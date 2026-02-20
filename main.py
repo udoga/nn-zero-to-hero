@@ -21,7 +21,9 @@ def make_neurons():
     x2w2 = x2*w2; x2w2.label = 'x2w2'
     x1w1x2w2 = x1w1 + x2w2; x1w1x2w2.label = 'x1w1 + x2w2'
     n = x1w1x2w2 + b; n.label = 'n'
-    o = n.tanh(); o.label = 'o'
+    e = (2*n).exp()
+    o = (e - 1) / (e + 1)
+    o.label = 'o'
     o.backward()
     draw_dot(o).view()
 
