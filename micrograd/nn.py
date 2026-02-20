@@ -1,9 +1,5 @@
-#!/usr/bin/env python3
-
 import random
-
-from draw_helper import draw_dot
-from value import *
+from micrograd.value import *
 
 class Neuron:
     def __init__(self, nin):

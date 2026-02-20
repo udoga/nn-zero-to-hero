@@ -1,6 +1,6 @@
-from value import Value
-from nn import MLP
-from draw_helper import draw_dot
+from micrograd.value import Value
+from micrograd.nn import MLP
+from micrograd.helpers import draw_dot
 
 def make_node_graph():
     a = Value(2.0, label='a')
