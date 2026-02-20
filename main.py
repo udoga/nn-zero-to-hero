@@ -1,7 +1,8 @@
 from value import Value
+from nn import MLP
 from draw_helper import draw_dot
 
-def make_nodes():
+def make_node_graph():
     a = Value(2.0, label='a')
     b = Value(-3.0, label='b')
     c = Value(10.0, label='c')
@@ -11,7 +12,7 @@ def make_nodes():
     L = d * f; L.label = 'L'
     draw_dot(L).view()
 
-def make_neurons():
+def make_neuron_graph():
     x1 = Value(2.0, label='x1')
     x2 = Value(0.0, label='x2')
     w1 = Value(-3.0, label='w1')
@@ -27,4 +28,26 @@ def make_neurons():
     o.backward()
     draw_dot(o).view()
 
-make_neurons()
+def make_torch_graph():
+    import torch  # pyright: ignore[reportMissingImports]
+    x1 = torch.Tensor([2.0]).double()               ; x1.requires_grad = True
+    x2 = torch.Tensor([0.0]).double()               ; x2.requires_grad = True
+    w1 = torch.Tensor([-3.0]).double()              ; w1.requires_grad = True
+    w2 = torch.Tensor([1.0]).double()               ; w2.requires_grad = True
+    b = torch.Tensor([6.8813735870195432]).double() ; b.requires_grad = True
+    n = x1*w1 + x2*w2 + b
+    o = torch.tanh(n)
+    print(o)
+    o.backward()
+    print('---', x1.grad.item(), w1.grad.item(), x2.grad.item(), w2.grad.item())
+
+def make_neural_network():
+    n = MLP(3, [4, 4, 1])
+    xs = [[2.0, 3.0, -1.0],
+          [3.0, -1.0, 0.5],
+          [0.5, 1.0, 1.0],
+          [1.0, 1.0, -1.0]]
+    ypred = [n(x) for x in xs]
+    print(ypred)
+
+make_neural_network()

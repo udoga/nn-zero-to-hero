@@ -10,7 +10,7 @@ class Value:
         self.label = label
 
     def __repr__(self):
-        return f"Value(label={self.label}, data={self.data})"
+        return f"Value(data={self.data}{', label=' + self.label if self.label else ''})"
 
     def __add__(self, other):
         other = other if isinstance(other, Value) else Value(other)
