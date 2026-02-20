@@ -22,18 +22,7 @@ def make_neurons():
     x1w1x2w2 = x1w1 + x2w2; x1w1x2w2.label = 'x1w1 + x2w2'
     n = x1w1x2w2 + b; n.label = 'n'
     o = n.tanh(); o.label = 'o'
-
-    o.grad = 1.0
-    n.grad = 1 - o.data**2
-    b.grad = n.grad
-    x1w1x2w2.grad = n.grad
-    x1w1.grad = x1w1x2w2.grad
-    x2w2.grad = x1w1x2w2.grad
-    x2.grad = x2w2.grad * w2.data
-    w2.grad = x2w2.grad * x2.data
-    x1.grad = x1w1.grad * w1.data
-    w1.grad = x1w1.grad * x1.data
-
+    o.backward()
     draw_dot(o).view()
 
 make_neurons()
