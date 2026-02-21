@@ -42,12 +42,22 @@ def make_torch_graph():
     print('---', x1.grad.item(), w1.grad.item(), x2.grad.item(), w2.grad.item())
 
 def make_neural_network():
-    n = MLP(3, [4, 4, 1])
-    xs = [[2.0, 3.0, -1.0],
-          [3.0, -1.0, 0.5],
-          [0.5, 1.0, 1.0],
-          [1.0, 1.0, -1.0]]
-    ypred = [n(x) for x in xs]
-    print(ypred)
+    mlp = MLP(3, [4, 4, 1])
+    inputs = [[2.0, 3.0, -1.0],
+              [3.0, -1.0, 0.5],
+              [0.5, 1.0, 1.0],
+              [1.0, 1.0, -1.0]]
+    targets = [1.0, -1.0, -1.0, 1.0]
+    step_size = 0.01
+    for _ in range(100):
+        predictions = [mlp(x)[0] for x in inputs]
+        loss = sum(((pred - target)**2 for pred, target in zip(predictions, targets)), Value(0.0))
+        for p in mlp.parameters():
+            p.grad = 0.0
+        loss.backward()
+        for p in mlp.parameters():
+            p.data -= step_size * p.grad
+        print("Loss:", round(loss.data, 4))
+    print("Predictions:", [mlp(x)[0] for x in inputs])
 
 make_neural_network()
