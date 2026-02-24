@@ -45,13 +45,28 @@ def sample_name(generator, prob_matrix, itos):
         if index == 0: break
     return name
 
+def sample_names(prob_matrix, itos, num_samples):
+    generator = torch.Generator().manual_seed(2147483647)
+    for _ in range(num_samples):
+        print(sample_name(generator, prob_matrix, itos))
+
+def find_avg_negative_log_likelihood(prob_matrix, words, stoi):
+    total_nll = 0.0
+    total_count = 0
+    for w in words:
+        chars = get_word_chars(w)
+        for c1, c2 in zip(chars, chars[1:]):
+            i1 = stoi[c1]
+            i2 = stoi[c2]
+            prob = prob_matrix[i1, i2]
+            total_nll += -torch.log(prob)
+            total_count += 1
+    return total_nll / total_count
+
 words = open("names.txt", 'r').read().splitlines()
 chars = get_all_chars(words)
 stoi = {s:i for i, s in enumerate(chars)}
 itos = {i:s for s, i in stoi.items()}
-matrix = make_bigram_matrix(words, chars, stoi)
-prob_matrix = matrix.float() / matrix.sum(dim=1, keepdim=True)
-# show_bigram_matrix(prob_matrix, itos)
-generator = torch.Generator().manual_seed(2147483647)
-for _ in range(20):
-    print(sample_name(generator, prob_matrix, itos))
+count_matrix = make_bigram_matrix(words, chars, stoi)
+prob_matrix = count_matrix.float() / count_matrix.sum(dim=1, keepdim=True)
+print(find_avg_negative_log_likelihood(prob_matrix, words, stoi))
