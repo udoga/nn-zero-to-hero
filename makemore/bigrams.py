@@ -71,15 +71,13 @@ def train_neural_network(bigrams, all_chars):
     xs = torch.tensor([all_chars.index(c1) for c1, _ in bigrams])
     ys = torch.tensor([all_chars.index(c2) for _, c2 in bigrams])
     x_encoded = F.one_hot(xs, num_classes=len(all_chars)).float()
-    y_encoded = F.one_hot(ys, num_classes=len(all_chars)).float()
-
     g = torch.Generator().manual_seed(2147483647)
     W = torch.randn((len(all_chars), len(all_chars)), generator=g, requires_grad=True)
 
     for _ in range(100):
         logits = x_encoded @ W
         probs = F.softmax(logits, dim=1)
-        loss = -probs[torch.arange(len(xs)), ys].log().mean()
+        loss = -probs[torch.arange(len(xs)), ys].log().mean() + 0.01 * (W**2).mean()
         print(loss.item())
         W.grad = None
         loss.backward()
@@ -91,7 +89,7 @@ bigrams = get_all_bigrams(words)
 bigram_counts = get_bigram_counts(bigrams)
 count_matrix = get_bigram_matrix(bigrams, all_chars) + 1 # smoothing
 prob_matrix = count_matrix.float() / count_matrix.sum(dim=1, keepdim=True)
-# show_bigram_matrix(prob_matrix, all_chars)
-# print(get_sample_names(prob_matrix, all_chars, 10))
-# print(get_avg_neg_log_likelihood(prob_matrix, words, all_chars))
+show_bigram_matrix(prob_matrix, all_chars)
+print(get_sample_names(prob_matrix, all_chars, 10))
+print(get_avg_neg_log_likelihood(prob_matrix, words, all_chars))
 train_neural_network(bigrams, all_chars)
