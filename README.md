@@ -1,4 +1,4 @@
-# Neural Network Practices
+# Neural Networks: Zero to Hero
 
 ### Setup
 
