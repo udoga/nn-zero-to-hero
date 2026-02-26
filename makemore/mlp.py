@@ -22,17 +22,18 @@ def create_dataset(words, chars, block_size=3):
 
 class MLP:
     def __init__(self, vocab_size=27, embedding_dim=10, block_size=3, hidden_dim=200):
-        g = torch.Generator().manual_seed(2147483647)
-        self.C = torch.randn((vocab_size, embedding_dim), generator=g, requires_grad=True)
-        self.W1 = torch.randn((block_size * embedding_dim, hidden_dim), generator=g, requires_grad=True)
-        self.b1 = torch.randn(hidden_dim, generator=g, requires_grad=True)
-        self.W2 = torch.randn((hidden_dim, vocab_size), generator=g, requires_grad=True)
-        self.b2 = torch.randn(vocab_size, generator=g, requires_grad=True)
+        self.g = torch.Generator().manual_seed(2147483647)
+        self.C = torch.randn((vocab_size, embedding_dim), generator=self.g, requires_grad=True)
+        self.W1 = torch.randn((block_size * embedding_dim, hidden_dim), generator=self.g, requires_grad=True)
+        self.b1 = torch.randn(hidden_dim, generator=self.g, requires_grad=True)
+        self.W2 = torch.randn((hidden_dim, vocab_size), generator=self.g, requires_grad=True)
+        self.b2 = torch.randn(vocab_size, generator=self.g, requires_grad=True)
         self.parameters = [self.C, self.W1, self.b1, self.W2, self.b2]
 
-    def train(self, X_train, Y_train, epochs=10000, batch_size=32, lr=0.1):
-        for _ in range(epochs):
-            ix = torch.randint(0, X_train.shape[0], (batch_size,))
+    def train(self, X_train, Y_train, epochs=200000, batch_size=32):
+        for i in range(epochs):
+            lr = 0.1 if i < 100000 else 0.01
+            ix = torch.randint(0, X_train.shape[0], (batch_size,), generator=self.g)
             loss = self.get_loss(X_train[ix], Y_train[ix])
             loss.backward()
             self.update_params(lr)
