@@ -1,25 +1,5 @@
-import random
 import torch
 import torch.nn.functional as F
-import matplotlib.pyplot as plt
-
-def split_word_list(words):
-    random.seed(42)
-    random.shuffle(words)
-    n1 = int(0.8 * len(words))
-    n2 = int(0.9 * len(words))
-    return words[:n1], words[n1:n2], words[n2:]
-
-def create_dataset(words, chars, block_size=3):
-    X, Y = [], []
-    for word in words:
-        context = [0] * block_size
-        for char in word + '.':
-            target = chars.index(char)
-            X.append(context)
-            Y.append(target)
-            context = context[1:] + [target]
-    return torch.tensor(X), torch.tensor(Y)
 
 class MLP:
     def __init__(self, vocab_size=27, embedding_dim=10, block_size=3, hidden_dim=200):
@@ -43,7 +23,8 @@ class MLP:
             loss = F.cross_entropy(logits, Y_train[indices])
             loss.backward()
             self.update_params(lr = 0.1 if i < 100000 else 0.01)
-            if i % 1000 == 0: print(f"Epoch {i}, Loss: {self.get_loss(X_train, Y_train).item()}")
+            if i % 10000 == 0: print(f"Epoch {i}, Loss: {self.get_loss(X_train, Y_train).item()}")
+        self.calibrate_bn_stats(X_train)
 
     @torch.no_grad()
     def calibrate_bn_stats(self, X_train):
@@ -64,36 +45,11 @@ class MLP:
         logits = h @ self.W2 + self.b2 # (batch_size, vocab_size)
         return logits
 
-    @torch.no_grad()
-    def get_loss(self, X, Y):
-        return F.cross_entropy(self.forward(X), Y)
-
     def update_params(self, lr):
         for p in self.parameters:
             p.data += -lr * p.grad # type: ignore
             p.grad = None
 
-    def sample_name(self, chars):
-        name = ''
-        context = [0] * 3
-        while True:
-            logits = self.forward(torch.tensor([context]))
-            probs = F.softmax(logits, dim=1)
-            index = torch.multinomial(probs, num_samples=1).item()
-            name += chars[index]
-            if index == 0: break
-            context = context[1:] + [index]
-        return name
-
-words = open('names.txt', 'r').read().splitlines()
-chars = ['.'] + sorted(set(''.join(words)))
-train_words, dev_words, test_words = split_word_list(words)
-X_train, Y_train = create_dataset(train_words, chars)
-X_dev, Y_dev = create_dataset(dev_words, chars)
-X_test, Y_test = create_dataset(test_words, chars)
-mlp = MLP(block_size=3)
-mlp.train(X_train, Y_train)
-mlp.calibrate_bn_stats(X_train)
-print("Train Loss:", mlp.get_loss(X_train, Y_train).item())
-print("Dev Loss:", mlp.get_loss(X_dev, Y_dev).item())
-print("Sample Names:", [mlp.sample_name(chars) for _ in range(10)])
+    @torch.no_grad()
+    def get_loss(self, X, Y):
+        return F.cross_entropy(self.forward(X), Y)
