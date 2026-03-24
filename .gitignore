@@ -1,3 +1,4 @@
+notebooks
 .venv
 __pycache__/
 *.gv

@@ -2,6 +2,7 @@ import random
 import torch
 from mlp import MLP
 from deep_nn import DeepNN
+from manual_nn import ManualNN
 from torch.nn import functional as F
 
 def split_words(words):
@@ -40,8 +41,10 @@ train_words, dev_words, test_words = split_words(words)
 X_train, Y_train = create_dataset(train_words, chars)
 X_dev, Y_dev = create_dataset(dev_words, chars)
 X_test, Y_test = create_dataset(test_words, chars)
-model = DeepNN() # MLP()
-model.train(X_train, Y_train)
-print("Train Loss:", model.get_loss(X_train, Y_train).item())
-print("Dev Loss:", model.get_loss(X_dev, Y_dev).item())
-print("Sample Names:", [sample_name(model, chars) for _ in range(10)])
+model = ManualNN()
+model.train_step(*model.create_batch(X_train, Y_train, batch_size=32))
+
+# model.train(X_train, Y_train)
+# print("Train Loss:", model.get_loss(X_train, Y_train).item())
+# print("Dev Loss:", model.get_loss(X_dev, Y_dev).item())
+# print("Sample Names:", [sample_name(model, chars) for _ in range(10)])
