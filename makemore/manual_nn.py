@@ -11,25 +11,28 @@ class ManualNN:
         self.b1 = torch.randn(hidden_dim,                         generator=self.g) * 0.1 # useless because of BN
         self.W2 = torch.randn((hidden_dim, vocab_size),           generator=self.g) * 0.1
         self.b2 = torch.randn(vocab_size,                         generator=self.g) * 0.1
-        self.bn_gain = torch.randn((1, hidden_dim))*0.1 + 1.0
-        self.bn_bias = torch.randn((1, hidden_dim))*0.1
+        self.bn_gain = torch.randn((1, hidden_dim),               generator=self.g) * 0.1 + 1.0
+        self.bn_bias = torch.randn((1, hidden_dim),               generator=self.g) * 0.1
         self.parameters = [self.C, self.W1, self.b1, self.W2, self.b2, self.bn_gain, self.bn_bias]
         for p in self.parameters: p.requires_grad = True
         print("Number of parameters:", sum(p.nelement() for p in self.parameters))
 
     def check_grad(self, name, grad, t):
-        if grad is None: return
         if grad.shape != t.grad.shape: raise ValueError("Invalid shape: grad=", grad.shape, " t.grad=", t.grad.shape)
         all_same = torch.all(grad == t.grad).item()
         all_close = torch.allclose(grad, t.grad)
         max_diff = (grad - t.grad).abs().max().item()
         print(f'{name:15s} | same: {str(all_same):5s} | close: {str(all_close):5s} | max_diff: {max_diff}')
 
-    def create_batch(self, X, Y, batch_size):
-        indices = torch.randint(0, X.shape[0], (batch_size,), generator=self.g)
-        return X[indices], Y[indices]
+    @torch.no_grad
+    def train(self, X_train, Y_train, epochs=200000, batch_size=32):
+        for i in range(epochs):
+            indices = torch.randint(0, X_train.shape[0], (batch_size,), generator=self.g)
+            lr = 0.1 if i < 100000 else 0.01
+            loss = self.process_batch(X_train[indices], Y_train[indices], lr)
+            if i % 10000 == 0: print(f'{i}: {loss.item():.4f}')
 
-    def train_step(self, X_batch, Y_batch):
+    def process_batch(self, X_batch, Y_batch, lr):
         # Forward pass
         n = len(X_batch)
         emb = self.C[X_batch]                              # (n, block_size, emb_dim)
@@ -54,12 +57,12 @@ class ManualNN:
         loss = -logprobs[range(n), Y_batch].mean()         # (1)
 
         # PyTorch backward pass
-        for p in self.parameters:
-            p.grad = None
-        for t in [logprobs, probs, counts, counts_sum, counts_sum_inv, normalized_logits, logit_maxes, logits, h,
-                  h_pre_act, bnraw, bnvar_inv, bnvar, bndiff2, bndiff, h_pre_bn, bnmeani, embcat, emb]:
-            t.retain_grad()
-        loss.backward()
+        # for p in self.parameters:
+        #     p.grad = None
+        # for t in [logprobs, probs, counts, counts_sum, counts_sum_inv, normalized_logits, logit_maxes, logits, h,
+        #           h_pre_act, bnraw, bnvar_inv, bnvar, bndiff2, bndiff, h_pre_bn, bnmeani, embcat, emb]:
+        #     t.retain_grad()
+        # loss.backward()
 
         # Manual backward pass
         logprobs_grad = torch.zeros_like(logprobs)
@@ -76,8 +79,7 @@ class ManualNN:
         h_grad = logits_grad @ self.W2.T
         W2_grad = h.T @ logits_grad
         b2_grad = (logits_grad * 1).sum(dim=0, keepdim=False)
-        h_pre_act_grad = h_grad * (1.0 - h**2)
-        h_pre_act_grad = h_pre_act.grad # using this because manual backprop causes a small difference
+        h_pre_act_grad = h_grad * (1.0 - h**2) # use h_pre_act.grad to prevent small difference with PyTorch grads
         bngain_grad = (h_pre_act_grad * bnraw).sum(0, keepdim=True)
         bnbias_grad = (h_pre_act_grad * 1).sum(0, keepdim=True)
         bnraw_grad = h_pre_act_grad * self.bn_gain
@@ -96,31 +98,15 @@ class ManualNN:
             for j in range(X_batch.shape[1]):
                 index = X_batch[i, j]
                 C_grad[index] += emb_grad[i, j]
+        grads = [C_grad, W1_grad, b1_grad, W2_grad, b2_grad, bngain_grad, bnbias_grad]
 
-        # Check calculated grads
-        self.check_grad('logprobs', logprobs_grad, logprobs)
-        self.check_grad('probs', probs_grad, probs)
-        self.check_grad('counts_sum_inv', counts_sum_inv_grad, counts_sum_inv)
-        self.check_grad('counts_sum', counts_sum_grad, counts_sum)
-        self.check_grad('counts', counts_grad, counts)
-        self.check_grad('norm_logits', normalized_logits_grad, normalized_logits)
-        self.check_grad('logit_maxes', logit_maxes_grad, logit_maxes)
-        self.check_grad('logits', logits_grad, logits)
-        self.check_grad('h', h_grad, h)
-        self.check_grad('W2', W2_grad, self.W2)
-        self.check_grad('b2', b2_grad, self.b2)
-        self.check_grad('hpreact', h_pre_act_grad, h_pre_act)
-        self.check_grad('bngain', bngain_grad, self.bn_gain)
-        self.check_grad('bnbias', bnbias_grad, self.bn_bias)
-        self.check_grad('bnraw', bnraw_grad, bnraw)
-        self.check_grad('bnvar_inv', bnvar_inv_grad, bnvar_inv)
-        self.check_grad('bnvar', bnvar_grad, bnvar)
-        self.check_grad('bndiff2', bndiff2_grad, bndiff2)
-        self.check_grad('bndiff', bndiff_grad, bndiff)
-        self.check_grad('bnmeani', bnmeani_grad, bnmeani)
-        self.check_grad('hprebn', h_pre_bn_grad, h_pre_bn)
-        self.check_grad('embcat', embcat_grad, embcat)
-        self.check_grad('W1', W1_grad, self.W1)
-        self.check_grad('b1', b1_grad, self.b1)
-        self.check_grad('emb', emb_grad, emb)
-        self.check_grad('C', C_grad, self.C)
+        # Compare grads to PyTorch grads
+        for name, p, g in zip(['C', 'W1', 'b1', 'W2', 'b2', 'bngain', 'bnbias'], self.parameters, grads):
+            if p.grad is not None:
+                self.check_grad(name, g, p)
+
+        # Update parameters
+        for p, grad in zip(self.parameters, grads):
+            p.data += -lr * grad
+
+        return loss
