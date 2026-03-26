@@ -5,44 +5,62 @@ from deep_nn import DeepNN
 from manual_nn import ManualNN
 from torch.nn import functional as F
 
-def split_words(words):
+def split_dataset(words, train_rate, dev_rate):
     random.seed(42)
     random.shuffle(words)
-    n1 = int(0.8 * len(words))
-    n2 = int(0.9 * len(words))
+    n1 = int(train_rate * len(words))
+    n2 = int((train_rate + dev_rate) * len(words))
     return words[:n1], words[n1:n2], words[n2:]
 
-def create_dataset(words, chars, block_size=3):
+def create_samples(words, vocab, block_size):
     X, Y = [], []
     for word in words:
-        context = [0] * block_size
-        for char in word + '.':
-            target = chars.index(char)
-            X.append(context)
-            Y.append(target)
-            context = context[1:] + [target]
+        add_samples(word, vocab, block_size, X, Y)
     return torch.tensor(X), torch.tensor(Y)
 
-def sample_name(model, chars):
-    name = ''
-    context = [0] * 3
+def add_samples(word, vocab, block_size, X, Y):
+    context = [0] * block_size
+    for char in word + '.':
+        target = vocab.index(char)
+        X.append(context)
+        Y.append(target)
+        context = context[1:] + [target]
+
+def print_samples(X, Y, vocab, count=10):
+    print("Samples:")
+    for x,y in zip(X[:count], Y[:count]):
+        print(''.join(vocab[i.item()] for i in x), '-->', vocab[y.item()])
+    print("...\n")
+
+def predict_next(model, context):
+    logits = model.forward(torch.tensor([context]))
+    probs = F.softmax(logits, dim=1)
+    index = torch.multinomial(probs, num_samples=1).item()
+    return index
+
+def generate_name(model, vocab, block_size):
+    name = '.' * block_size
     while True:
-        logits = model.forward(torch.tensor([context]))
-        probs = F.softmax(logits, dim=1)
-        index = torch.multinomial(probs, num_samples=1).item()
-        name += chars[index]
+        context = [vocab.index(c) for c in name[-block_size:]]
+        index = predict_next(model, context)
+        name += vocab[index]
         if index == 0: break
-        context = context[1:] + [index]
-    return name
+    return name[block_size:]
+
+def generate_names(model, vocab, block_size, count=10):
+    return [generate_name(model, vocab, block_size) for _ in range(count)]
 
 words = open('names.txt', 'r').read().splitlines()
-chars = ['.'] + sorted(set(''.join(words)))
-train_words, dev_words, test_words = split_words(words)
-X_train, Y_train = create_dataset(train_words, chars)
-X_dev, Y_dev = create_dataset(dev_words, chars)
-X_test, Y_test = create_dataset(test_words, chars)
-model = ManualNN()
-model.train(X_train, Y_train)
-# print("Train Loss:", model.get_loss(X_train, Y_train).item())
-# print("Dev Loss:", model.get_loss(X_dev, Y_dev).item())
-# print("Sample Names:", [sample_name(model, chars) for _ in range(10)])
+vocab = ['.'] + sorted(set(''.join(words)))
+block_size = 3
+train_words, dev_words, test_words = split_dataset(words, 0.8, 0.1)
+X_train, Y_train = create_samples(train_words, vocab, block_size)
+X_dev, Y_dev = create_samples(dev_words, vocab, block_size)
+X_test, Y_test = create_samples(test_words, vocab, block_size)
+print_samples(X_train, Y_train, vocab)
+
+model = ManualNN(block_size=block_size) # or MLP() or DeepNN()
+model.train(X_train, Y_train, grad_check=True, epochs=1)
+print("Train Loss:", model.get_loss(X_train, Y_train).item())
+print("Dev Loss:", model.get_loss(X_dev, Y_dev).item())
+print("Sample Names:", generate_names(model, vocab, block_size, count=10))
