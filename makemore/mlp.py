@@ -16,14 +16,14 @@ class MLP:
         self.parameters = [self.C, self.W1, self.b1, self.W2, self.b2, self.bn_gain, self.bn_bias]
         for p in self.parameters: p.requires_grad = True
 
-    def train(self, X_train, Y_train, epochs=200000, batch_size=32):
-        for i in range(epochs):
+    def train(self, X_train, Y_train, max_steps=200000, batch_size=32):
+        for i in range(max_steps):
             indices = torch.randint(0, X_train.shape[0], (batch_size,), generator=self.g)
             logits = self.forward(X_train[indices])
             loss = F.cross_entropy(logits, Y_train[indices])
             loss.backward()
             self.update_params(lr = 0.1 if i < 100000 else 0.01)
-            if i % 10000 == 0: print(f"Epoch {i}, Loss: {self.get_loss(X_train, Y_train).item()}")
+            if i % 10000 == 0: print(f"Step {i}, Loss: {self.get_loss(X_train, Y_train).item()}")
         self.calibrate_bn_stats(X_train)
 
     @torch.no_grad()

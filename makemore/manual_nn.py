@@ -17,8 +17,8 @@ class ManualNN:
         for p in self.parameters: p.requires_grad = True
         print("Number of parameters:", sum(p.nelement() for p in self.parameters))
 
-    def train(self, X_train, Y_train, epochs=200000, batch_size=32, grad_check=False):
-        for i in range(epochs):
+    def train(self, X_train, Y_train, max_steps=200000, batch_size=32, grad_check=False):
+        for i in range(max_steps):
             indices = torch.randint(0, X_train.shape[0], (batch_size,), generator=self.g)
             X_batch, Y_batch = X_train[indices], Y_train[indices]
             tensors = self.atomic_forward(X_batch)
@@ -27,7 +27,7 @@ class ManualNN:
             grads = self.atomic_backward(X_batch, Y_batch, *tensors)
             if grad_check: self.check_grads(grads)
             self.update_params(lr = 0.1 if i < 100000 else 0.01, grads=grads)
-            if i % 10000 == 0: print(f'Epoch {i} - Loss: {loss.item():.4f}')
+            if i % 10000 == 0: print(f'Step {i} - Loss: {loss.item():.4f}')
 
     def atomic_forward(self, X):
         n = len(X)
