@@ -1,18 +1,18 @@
 import torch
 import torch.nn.functional as F
-from layers import Embedding, Flatten, Linear, BatchNorm1d, Tanh, Sequential
+from layers import Embedding, FlattenConsecutive, Linear, BatchNorm1d, Tanh, Sequential
 
 class WaveNet:
     def __init__(self, vocab_size=27, block_size=3, emb_dim=10, hidden_dim=200, seed=42):
-        torch.manual_seed(42)
+        torch.manual_seed(seed)
         self.container = Sequential([
             Embedding(vocab_size, emb_dim),
-            Flatten(),
-            Linear(emb_dim * block_size, hidden_dim, bias=False),
-            BatchNorm1d(hidden_dim),
-            Tanh(),
+            FlattenConsecutive(2), Linear(emb_dim   *2, hidden_dim, bias=False), BatchNorm1d(hidden_dim), Tanh(),
+            FlattenConsecutive(2), Linear(hidden_dim*2, hidden_dim, bias=False), BatchNorm1d(hidden_dim), Tanh(),
+            FlattenConsecutive(2), Linear(hidden_dim*2, hidden_dim, bias=False), BatchNorm1d(hidden_dim), Tanh(),
             Linear(hidden_dim, vocab_size)])
         for p in self.container.parameters(): p.requires_grad = True
+        print(f'Number of parameters: {sum(p.numel() for p in self.container.parameters())}')
         self.loss_history = []
         self.calibrate_weights()
 

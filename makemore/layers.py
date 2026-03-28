@@ -25,8 +25,9 @@ class BatchNorm1d:
         self.running_var = torch.ones(dim)
 
     def __call__(self, x):
-        x_avg = x.mean(0, keepdim=True) if self.training else self.running_avg
-        x_var = x.var(0, keepdim=True) if self.training else self.running_var
+        dim = 0 if x.ndim == 2 else (0, 1)
+        x_avg = x.mean(dim, keepdim=True) if self.training else self.running_avg
+        x_var = x.var(dim, keepdim=True) if self.training else self.running_var
         x_normalized = (x - x_avg) / torch.sqrt(x_var + self.eps)
         self.out = self.gamma * x_normalized + self.beta
         if self.training: self.update_buffers(x_avg, x_var)
@@ -62,6 +63,21 @@ class Embedding:
 class Flatten:
     def __call__(self, x):
         self.out = x.view(x.shape[0], -1)
+        return self.out
+
+    def parameters(self):
+        return []
+
+class FlattenConsecutive:
+    def __init__(self, n):
+        self.n = n
+
+    def __call__(self, x):
+        B, T, C = x.shape
+        x = x.view(B, T//self.n, C*self.n)
+        if x.shape[1] == 1:
+            x = x.squeeze(1)
+        self.out = x
         return self.out
 
     def parameters(self):

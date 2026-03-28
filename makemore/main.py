@@ -62,14 +62,14 @@ def plot_loss_history(loss_history):
 
 words = open('names.txt', 'r').read().splitlines()
 vocab = ['.'] + sorted(set(''.join(words)))
-block_size = 3
+block_size = 8
 train_words, dev_words, test_words = split_dataset(words, 0.8, 0.1)
 X_train, Y_train = create_samples(train_words, vocab, block_size)
 X_dev, Y_dev = create_samples(dev_words, vocab, block_size)
 X_test, Y_test = create_samples(test_words, vocab, block_size)
 print_samples(X_train, Y_train, vocab)
 
-model = WaveNet(block_size=block_size) # or MLP(), DeepNN(), ManualNN()
+model = WaveNet(block_size=block_size, emb_dim=24, hidden_dim=128) # or MLP(), DeepNN(), ManualNN()
 model.train(X_train, Y_train, max_steps=200000, batch_size=32)
 print("Train Loss:", model.get_loss(X_train, Y_train).item())
 print("Dev Loss:", model.get_loss(X_dev, Y_dev).item())
