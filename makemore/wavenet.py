@@ -4,14 +4,14 @@ from layers import Embedding, Flatten, Linear, BatchNorm1d, Tanh, Sequential
 
 class WaveNet:
     def __init__(self, vocab_size=27, block_size=3, emb_dim=10, hidden_dim=200, seed=42):
-        self.g = torch.Generator().manual_seed(seed)
+        torch.manual_seed(42)
         self.container = Sequential([
             Embedding(vocab_size, emb_dim),
             Flatten(),
-            Linear(emb_dim * block_size, hidden_dim, generator=self.g, bias=False),
+            Linear(emb_dim * block_size, hidden_dim, bias=False),
             BatchNorm1d(hidden_dim),
             Tanh(),
-            Linear(hidden_dim, vocab_size, generator=self.g)])
+            Linear(hidden_dim, vocab_size)])
         for p in self.container.parameters(): p.requires_grad = True
         self.loss_history = []
         self.calibrate_weights()
@@ -35,7 +35,7 @@ class WaveNet:
         self.track(i, max_steps, loss)
 
     def make_batch(self, X, Y, batch_size):
-        indices = torch.randint(0, X.shape[0], (batch_size,), generator=self.g)
+        indices = torch.randint(0, X.shape[0], (batch_size,))
         return X[indices], Y[indices]
 
     def forward(self, x):
