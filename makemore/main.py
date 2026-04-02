@@ -60,7 +60,7 @@ def plot_loss_history(loss_history):
     plt.title('Training Loss History')
     plt.show()
 
-words = open('names.txt', 'r').read().splitlines()
+words = open('../data/names.txt', 'r').read().splitlines()
 vocab = ['.'] + sorted(set(''.join(words)))
 block_size = 8
 train_words, dev_words, test_words = split_dataset(words, 0.8, 0.1)
