@@ -1,0 +1,57 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class Head(nn.Module):
+    def __init__(self, head_size, block_size, emb_size):
+        super().__init__()
+        self.key = nn.Linear(emb_size, head_size, bias=False)
+        self.query = nn.Linear(emb_size, head_size, bias=False)
+        self.value = nn.Linear(emb_size, head_size, bias=False)
+        self.tril: torch.Tensor
+        self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
+
+    def forward(self, x):
+        B, T, C = x.shape                                        # batch size, block size, embedding size
+        k = self.key(x)                                          # (B, T, head_size)
+        q = self.query(x)                                        # (B, T, head_size)
+        A = q @ k.transpose(-2,-1) * k.shape[-1]**-0.5           # (B, T, head_size) @ (B, head_size, T) -> (B, T, T)
+        A = A.masked_fill(self.tril[:T, :T] == 0, float('-inf')) # (B, T, T)
+        A = F.softmax(A, dim=-1)                                 # (B, T, T)
+        v = self.value(x)                                        # (B, T, head_size)
+        y = A @ v                                                # (B, T, T) @ (B, T, head_size) -> (B, T, head_size)
+        return y
+
+class GPTModel(nn.Module):
+    def __init__(self, vocab_size, block_size, emb_size):
+        super().__init__()
+        self.block_size = block_size
+        self.tok_emb_table = nn.Embedding(vocab_size, emb_size)
+        self.pos_emb_table = nn.Embedding(block_size, emb_size)
+        self.self_attention_head = Head(emb_size, block_size, emb_size)
+        self.lm_head = nn.Linear(emb_size, vocab_size)
+
+    def forward(self, token_ids, targets=None):                                               # (B, T)
+        tok_emb = self.tok_emb_table(token_ids)                                               # (B, T, C)
+        pos_emb = self.pos_emb_table(torch.arange(token_ids.size(1), device=tok_emb.device))  # (T, C)
+        x = tok_emb + pos_emb                                                                 # (B, T, C)
+        x = self.self_attention_head(x)                                                       # (B, T, C)
+        logits = self.lm_head(x)                                                              # (B, T, vocab_size)
+        loss = None if targets is None else self.get_loss(logits, targets)
+        return logits, loss
+
+    def get_loss(self, logits, targets):
+        B, T, C = logits.shape
+        logits = logits.view(B*T, C)
+        targets = targets.view(B*T)
+        return F.cross_entropy(logits, targets)
+
+    def generate(self, token_ids, max_new_tokens):
+        for _ in range(max_new_tokens):
+            cropped_token_ids = token_ids[:, -self.block_size:] # (B, block_size)
+            logits, _ = self(cropped_token_ids)                 # (B, block_size, vocab_size)
+            logits = logits[:, -1, :]                           # (B, vocab_size), only the last token
+            probs = F.softmax(logits, dim=-1)                   # (B, vocab_size)
+            ids_next = torch.multinomial(probs, num_samples=1)  # (B, 1)
+            token_ids = torch.cat((token_ids, ids_next), dim=1) # (B, block_size+1), appended column
+        return token_ids
