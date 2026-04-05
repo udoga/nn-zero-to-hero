@@ -57,25 +57,47 @@ class Block(nn.Module):
         x = x + self.feed_forward(self.norm2(x))
         return x
 
-class GPTModel(nn.Module):
+class GPT(nn.Module):
     def __init__(self, vocab_size, block_size, emb_size, head_count, dropout_rate, layer_count):
         super().__init__()
         self.block_size = block_size
-        self.tok_emb_table = nn.Embedding(vocab_size, emb_size)
-        self.pos_emb_table = nn.Embedding(block_size, emb_size)
+        self.token_embedding = nn.Embedding(vocab_size, emb_size)
+        self.position_embedding = nn.Embedding(block_size, emb_size)
         self.blocks = nn.Sequential(*[Block(head_count, block_size, emb_size, dropout_rate) for _ in range(layer_count)])
         self.layer_norm = nn.LayerNorm(emb_size)
-        self.lm_head = nn.Linear(emb_size, vocab_size)
+        self.unembedding = nn.Linear(emb_size, vocab_size)
+        self.eval()
 
-    def forward(self, token_ids, targets=None):                                               # (B, T)
-        tok_emb = self.tok_emb_table(token_ids)                                               # (B, T, C)
-        pos_emb = self.pos_emb_table(torch.arange(token_ids.size(1), device=tok_emb.device))  # (T, C)
-        x = tok_emb + pos_emb                                                                 # (B, T, C)
-        x = self.blocks(x)                                                                    # (B, T, C)
-        x = self.layer_norm(x)                                                                # (B, T, C)
-        logits = self.lm_head(x)                                                              # (B, T, vocab_size)
-        loss = None if targets is None else self.get_loss(logits, targets)
-        return logits, loss
+    def fit(self, train_data, batch_size, step_count, optimizer):
+        self.train()
+        for step in range(step_count):
+            self.step(step, train_data, batch_size, optimizer)
+        self.eval()
+
+    def step(self, step, train_data, batch_size, optimizer):
+        xb, yb = self.get_batch(train_data, batch_size)
+        logits = self(xb)
+        loss = self.get_loss(logits, yb)
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()
+        if step % 1000 == 0: print(f"Step {step}, Loss: {loss.item()}")
+
+    def get_batch(self, data, batch_size):
+        indices = torch.randint(len(data) - self.block_size, (batch_size,))
+        x = torch.stack([data[i:i+self.block_size] for i in indices])
+        y = torch.stack([data[i+1:i+self.block_size+1] for i in indices])
+        return x, y
+
+    def forward(self, token_ids):
+        positions = torch.arange(token_ids.size(1))
+        tok_emb = self.token_embedding(token_ids)    # (B, T, C)
+        pos_emb = self.position_embedding(positions) # (T, C)
+        x = tok_emb + pos_emb                        # (B, T, C)
+        x = self.blocks(x)                           # (B, T, C)
+        x = self.layer_norm(x)                       # (B, T, C)
+        logits = self.unembedding(x)                 # (B, T, vocab_size)
+        return logits
 
     def get_loss(self, logits, targets):
         B, T, C = logits.shape
@@ -83,12 +105,18 @@ class GPTModel(nn.Module):
         targets = targets.view(B*T)
         return F.cross_entropy(logits, targets)
 
-    def generate(self, token_ids, max_new_tokens):
-        for _ in range(max_new_tokens):
-            cropped_token_ids = token_ids[:, -self.block_size:] # (B, T)
-            logits, _ = self(cropped_token_ids)                 # (B, T, vocab_size)
+    @torch.no_grad()
+    def generate(self, token_ids, token_count):
+        for _ in range(token_count):
+            block_token_ids = token_ids[:, -self.block_size:]   # (B, T)
+            logits = self(block_token_ids)                      # (B, T, vocab_size)
             logits = logits[:, -1, :]                           # (B, vocab_size), only the last token
             probs = F.softmax(logits, dim=-1)                   # (B, vocab_size)
             ids_next = torch.multinomial(probs, num_samples=1)  # (B, 1)
             token_ids = torch.cat((token_ids, ids_next), dim=1) # (B, T+1), appended column
         return token_ids
+
+    def print_text(self, token_count, vocab):
+        token_ids = torch.zeros((1, 1), dtype=torch.long)
+        generated_token_ids = self.generate(token_ids, token_count)[0].cpu().tolist()
+        print(''.join([vocab[i] for i in generated_token_ids]))
