@@ -3,3 +3,6 @@ graphviz
 torch
 matplotlib
 ipykernel
+transformers
+tiktoken
+pytest
