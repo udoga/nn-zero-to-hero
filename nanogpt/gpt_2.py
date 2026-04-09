@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from pathlib import Path
 from typing import cast
 from transformers import GPT2LMHeadModel
 import tiktoken
@@ -78,11 +79,33 @@ class Block(nn.Module):
 class GPT(nn.Module):
     def __init__(self, c: GPTConfig):
         super().__init__()
+        self.config = c
         self.token_embedding = nn.Embedding(c.vocab_size, c.embedding_size)
         self.position_embedding = nn.Embedding(c.block_size, c.embedding_size)
         self.blocks = nn.ModuleList([Block(c) for _ in range(c.layer_count)])
         self.final_norm = nn.LayerNorm(c.embedding_size)
         self.unembedding = nn.Linear(c.embedding_size, c.vocab_size, bias=False)
+
+    def fit(self, train_data, batch_size, step_count, optimizer):
+        self.train()
+        for step in range(step_count):
+            self.step(step, train_data, batch_size, optimizer)
+        self.eval()
+
+    def step(self, step, train_data, batch_size, optimizer):
+        xb, yb = self.get_batch(train_data, batch_size)
+        logits = self(xb)
+        loss = self.get_loss(logits, yb)
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()
+        print(f"Step {step}, Loss: {loss.item()}")
+
+    def get_batch(self, data, batch_size):
+        indices = torch.randint(len(data) - self.config.block_size, (batch_size,))
+        x = torch.stack([data[i:i+self.config.block_size] for i in indices])
+        y = torch.stack([data[i+1:i+self.config.block_size+1] for i in indices])
+        return x, y
 
     def forward(self, token_ids):
         B, T = token_ids.size()                                                       # (B, T)
@@ -93,11 +116,16 @@ class GPT(nn.Module):
         x = self.final_norm(x)                                                        # (B, T, C)
         return self.unembedding(x)                                                    # (B, T, vocab_size)
 
+    def get_loss(self, logits, targets):
+        B, T, C = logits.shape
+        logits = logits.view(B*T, C)
+        targets = targets.view(B*T)
+        return F.cross_entropy(logits, targets)
+
     @torch.no_grad()
     def generate(self, token_ids, new_token_count):
         for _ in range(new_token_count):
-            context_size = self.position_embedding.num_embeddings
-            context_token_ids = token_ids[:, -context_size:]                       # (B, T)
+            context_token_ids = token_ids[:, -self.config.block_size:]             # (B, T)
             logits = self(context_token_ids)                                       # (B, T, vocab_size)
             next_token_logits = logits[:, -1, :]                                   # (B, vocab_size)
             next_token_probs = F.softmax(next_token_logits, dim=-1)                # (B, vocab_size)
@@ -141,11 +169,26 @@ class GPT(nn.Module):
         return key
 
 
+def get_pretrained_model():
+    return GPT.from_model("gpt2").eval()
+
+def train_new_model():
+    config = GPTConfig(block_size=32, embedding_size=768, layer_count=12, head_count=12, vocab_size=encoder.n_vocab)
+    model = GPT(config)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+    model.fit(train_data, batch_size=4, step_count=50, optimizer=optimizer)
+    return model.eval()
+
 torch.set_default_device('cuda' if torch.cuda.is_available() else 'cpu')
 torch.manual_seed(42)
 
-model = GPT.from_model("gpt2")
+data_path = Path(__file__).resolve().parent.parent / 'data' / 'shakespeare.txt'
+text = data_path.read_text()[:1000]
 encoder = tiktoken.get_encoding("gpt2")
+data = torch.tensor(encoder.encode(text), dtype=torch.long)
+train_size = int(0.9 * len(data))
+train_data, val_data = data[:train_size], data[train_size:]
+model = train_new_model() # or get_pretrained_model()
 prompt = "Hello, I'm a language model,"
 input_token_ids = torch.tensor(encoder.encode(prompt), dtype=torch.long)
 output_token_ids = model.generate(input_token_ids.unsqueeze(0), new_token_count=32)[0]
