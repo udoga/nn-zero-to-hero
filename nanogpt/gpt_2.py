@@ -58,8 +58,7 @@ class FeedForward(nn.Sequential):
         super().__init__(
             nn.Linear(c.embedding_size, 4 * c.embedding_size),
             nn.GELU(approximate="tanh"),
-            nn.Linear(4 * c.embedding_size, c.embedding_size),
-        )
+            nn.Linear(4 * c.embedding_size, c.embedding_size))
 
 
 class Block(nn.Module):
@@ -102,7 +101,9 @@ class GPT(nn.Module):
             logits = self(context_token_ids)                                       # (B, T, vocab_size)
             next_token_logits = logits[:, -1, :]                                   # (B, vocab_size)
             next_token_probs = F.softmax(next_token_logits, dim=-1)                # (B, vocab_size)
-            next_token_ids = torch.multinomial(next_token_probs, num_samples=1)    # (B, 1)
+            topk_probs, topk_indices = torch.topk(next_token_probs, k=50, dim=-1)  # (B, 10) each
+            next_token_indices = torch.multinomial(topk_probs, num_samples=1)      # (B, 1)
+            next_token_ids = torch.gather(topk_indices, -1, next_token_indices)    # (B, 1)
             token_ids = torch.cat((token_ids, next_token_ids), dim=1)              # (B, T+1)
         return token_ids                                                           # (B, T+new_token_count)
 
