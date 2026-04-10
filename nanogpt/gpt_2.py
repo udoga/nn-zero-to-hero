@@ -10,64 +10,64 @@ from torch.nn import functional as F
 
 @dataclass
 class GPTConfig:
-    block_size: int = 1024
+    ctx_size: int = 1024
     vocab_size: int = 50257
-    layer_count: int = 12
+    block_count: int = 12
     head_count: int = 12
-    embedding_size: int = 768
+    emb_size: int = 768
 
     @classmethod
     def from_model(cls, model_type):
         assert model_type in {"gpt2", "gpt2-medium", "gpt2-large", "gpt2-xl"}
         config_args = {
-            "gpt2": dict(layer_count=12, head_count=12, embedding_size=768),
-            "gpt2-medium": dict(layer_count=24, head_count=16, embedding_size=1024),
-            "gpt2-large": dict(layer_count=36, head_count=20, embedding_size=1280),
-            "gpt2-xl": dict(layer_count=48, head_count=25, embedding_size=1600),
+            "gpt2": dict(block_count=12, head_count=12, emb_size=768),
+            "gpt2-medium": dict(block_count=24, head_count=16, emb_size=1024),
+            "gpt2-large": dict(block_count=36, head_count=20, emb_size=1280),
+            "gpt2-xl": dict(block_count=48, head_count=25, emb_size=1600),
         }[model_type]
-        return cls(vocab_size=50257, block_size=1024, **config_args)
+        return cls(vocab_size=50257, ctx_size=1024, **config_args)
 
 
 class CausalSelfAttention(nn.Module):
     def __init__(self, c: GPTConfig):
         super().__init__()
-        assert c.embedding_size % c.head_count == 0
+        assert c.emb_size % c.head_count == 0
         self.head_count = c.head_count
-        self.embedding_size = c.embedding_size
-        self.qkv_projection = nn.Linear(c.embedding_size, 3 * c.embedding_size)
-        self.output_projection = nn.Linear(c.embedding_size, c.embedding_size)
-        self.register_buffer("tril", torch.tril(torch.ones(c.block_size, c.block_size)), persistent=False)
+        self.emb_size = c.emb_size
+        self.qkv_projection = nn.Linear(c.emb_size, 3 * c.emb_size)
+        self.output_projection = nn.Linear(c.emb_size, c.emb_size)
+        self.register_buffer("tril", torch.tril(torch.ones(c.ctx_size, c.ctx_size)), persistent=False)
 
     def to_heads(self, x, B, T, C):
         return x.view(B, T, self.head_count, C // self.head_count).transpose(1, 2)
 
     def forward(self, x):
-        B, T, C = x.size()                                              # (B, T, C)
-        qkv = self.qkv_projection(x)                                    # (B, T, 3 * C)
-        q, k, v = qkv.split(self.embedding_size, dim=2)                 # (B, T, C) each
-        q, k, v = [self.to_heads(part, B, T, C) for part in (q, k, v)]  # (B, HC, T, HS) each
-        A = (q @ k.transpose(-2, -1)) / (k.shape[-1] ** 0.5)            # (B, HC, T, T)
+        B, T, C = x.size()                                                                  # (B, T, C)
+        qkv = self.qkv_projection(x)                                                        # (B, T, 3 * C)
+        q, k, v = qkv.split(self.emb_size, dim=2)                                           # (B, T, C) each
+        q, k, v = [self.to_heads(part, B, T, C) for part in (q, k, v)]                      # (B, HC, T, HS) each
+        A = (q @ k.transpose(-2, -1)) / (k.shape[-1] ** 0.5)                                # (B, HC, T, T)
         A = A.masked_fill(cast(torch.Tensor, self.tril)[:T, :T] == 0, float("-inf"))        # (B, HC, T, T)
-        A = F.softmax(A, dim=-1)                                        # (B, HC, T, T)
-        y = A @ v                                                       # (B, HC, T, HS)
-        y = y.transpose(1, 2).contiguous().view(B, T, C)                # (B, T, C)
-        return self.output_projection(y)                                # (B, T, C)
+        A = F.softmax(A, dim=-1)                                                            # (B, HC, T, T)
+        y = A @ v                                                                           # (B, HC, T, HS)
+        y = y.transpose(1, 2).contiguous().view(B, T, C)                                    # (B, T, C)
+        return self.output_projection(y)                                                    # (B, T, C)
 
 
 class FeedForward(nn.Sequential):
     def __init__(self, c: GPTConfig):
         super().__init__(
-            nn.Linear(c.embedding_size, 4 * c.embedding_size),
+            nn.Linear(c.emb_size, 4 * c.emb_size),
             nn.GELU(approximate="tanh"),
-            nn.Linear(4 * c.embedding_size, c.embedding_size))
+            nn.Linear(4 * c.emb_size, c.emb_size))
 
 
 class Block(nn.Module):
     def __init__(self, c: GPTConfig):
         super().__init__()
-        self.pre_attention_norm = nn.LayerNorm(c.embedding_size)
+        self.pre_attention_norm = nn.LayerNorm(c.emb_size)
         self.attention = CausalSelfAttention(c)
-        self.pre_feed_forward_norm = nn.LayerNorm(c.embedding_size)
+        self.pre_feed_forward_norm = nn.LayerNorm(c.emb_size)
         self.feed_forward = FeedForward(c)
 
     def forward(self, x):
@@ -80,11 +80,13 @@ class GPT(nn.Module):
     def __init__(self, c: GPTConfig):
         super().__init__()
         self.config = c
-        self.token_embedding = nn.Embedding(c.vocab_size, c.embedding_size)
-        self.position_embedding = nn.Embedding(c.block_size, c.embedding_size)
-        self.blocks = nn.ModuleList([Block(c) for _ in range(c.layer_count)])
-        self.final_norm = nn.LayerNorm(c.embedding_size)
-        self.unembedding = nn.Linear(c.embedding_size, c.vocab_size, bias=False)
+        self.token_embedding = nn.Embedding(c.vocab_size, c.emb_size)
+        self.position_embedding = nn.Embedding(c.ctx_size, c.emb_size)
+        self.blocks = nn.ModuleList([Block(c) for _ in range(c.block_count)])
+        self.final_norm = nn.LayerNorm(c.emb_size)
+        self.unembedding = nn.Linear(c.emb_size, c.vocab_size, bias=False)
+        self.token_embedding.weight = self.unembedding.weight
+        self.apply(self.initialize_weights)
 
     def fit(self, train_data, batch_size, step_count, optimizer):
         self.train()
@@ -102,9 +104,9 @@ class GPT(nn.Module):
         print(f"Step {step}, Loss: {loss.item()}")
 
     def get_batch(self, data, batch_size):
-        indices = torch.randint(len(data) - self.config.block_size, (batch_size,))
-        x = torch.stack([data[i:i+self.config.block_size] for i in indices])
-        y = torch.stack([data[i+1:i+self.config.block_size+1] for i in indices])
+        indices = torch.randint(len(data) - self.config.ctx_size, (batch_size,))
+        x = torch.stack([data[i:i+self.config.ctx_size] for i in indices])
+        y = torch.stack([data[i+1:i+self.config.ctx_size+1] for i in indices])
         return x, y
 
     def forward(self, token_ids):
@@ -125,7 +127,7 @@ class GPT(nn.Module):
     @torch.no_grad()
     def generate(self, token_ids, new_token_count):
         for _ in range(new_token_count):
-            context_token_ids = token_ids[:, -self.config.block_size:]             # (B, T)
+            context_token_ids = token_ids[:, -self.config.ctx_size:]               # (B, T)
             logits = self(context_token_ids)                                       # (B, T, vocab_size)
             next_token_logits = logits[:, -1, :]                                   # (B, vocab_size)
             next_token_probs = F.softmax(next_token_logits, dim=-1)                # (B, vocab_size)
@@ -136,7 +138,7 @@ class GPT(nn.Module):
         return token_ids                                                           # (B, T+new_token_count)
 
     @classmethod
-    def from_model(cls, model_type):
+    def from_pretrained(cls, model_type):
         config = GPTConfig.from_model(model_type)
         local_model = GPT(config)
         local_dict = local_model.state_dict()
@@ -168,27 +170,33 @@ class GPT(nn.Module):
         key = key.replace("lm_head.", "unembedding.")
         return key
 
+    def initialize_weights(self, module):
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02*(2*self.config.block_count)**-0.5)
+        if isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+        if isinstance(module, nn.Linear) and module.bias is not None:
+            torch.nn.init.zeros_(module.bias)
 
-def get_pretrained_model():
-    return GPT.from_model("gpt2").eval()
-
-def train_new_model():
-    config = GPTConfig(block_size=32, embedding_size=768, layer_count=12, head_count=12, vocab_size=encoder.n_vocab)
+def train_model(encoder):
+    data_path = Path(__file__).resolve().parent.parent / 'data' / 'shakespeare.txt'
+    text = data_path.read_text()[:1000]
+    data = torch.tensor(encoder.encode(text), dtype=torch.long)
+    train_size = int(0.9 * len(data))
+    train_data, _ = data[:train_size], data[train_size:]
+    config = GPTConfig(ctx_size=32, emb_size=768, block_count=12, head_count=12, vocab_size=encoder.n_vocab)
     model = GPT(config)
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
     model.fit(train_data, batch_size=4, step_count=50, optimizer=optimizer)
     return model.eval()
 
+torch.manual_seed(1337)
+torch.set_float32_matmul_precision('high')
 torch.set_default_device('cuda' if torch.cuda.is_available() else 'cpu')
-torch.manual_seed(42)
+print("Device:", torch.get_default_device())
 
-data_path = Path(__file__).resolve().parent.parent / 'data' / 'shakespeare.txt'
-text = data_path.read_text()[:1000]
 encoder = tiktoken.get_encoding("gpt2")
-data = torch.tensor(encoder.encode(text), dtype=torch.long)
-train_size = int(0.9 * len(data))
-train_data, val_data = data[:train_size], data[train_size:]
-model = train_new_model() # or get_pretrained_model()
+model = train_model(encoder) # or GPT.from_pretrained("gpt2")
 prompt = "Hello, I'm a language model,"
 input_token_ids = torch.tensor(encoder.encode(prompt), dtype=torch.long)
 output_token_ids = model.generate(input_token_ids.unsqueeze(0), new_token_count=32)[0]
