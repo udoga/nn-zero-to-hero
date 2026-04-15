@@ -90,14 +90,16 @@ class GPT(nn.Module):
         self.token_embedding.weight = self.unembedding.weight
         self.apply(self.initialize_weights)
 
-    def forward(self, token_ids):
+    def forward(self, token_ids, targets=None):
         B, T = token_ids.size()                                                       # (B, T)
         positions = torch.arange(0, T, device=token_ids.device)                       # (T)
         x = self.token_embedding(token_ids) + self.position_embedding(positions)      # (B, T, C)
         for block in self.blocks:
             x = block(x)                                                              # (B, T, C)
         x = self.final_norm(x)                                                        # (B, T, C)
-        return self.unembedding(x)                                                    # (B, T, vocab_size)
+        logits = self.unembedding(x)                                                  # (B, T, vocab_size)
+        loss = None if targets is None else self.get_loss(logits, targets)
+        return logits, loss
 
     def get_loss(self, logits, targets):
         B, T, C = logits.shape
@@ -180,15 +182,14 @@ class ModelTrainer:
         t0 = time.time()
         xb, yb = self.get_next_batch()
         optimizer.zero_grad()
-        logits = model(xb)
-        loss = model.get_loss(logits, yb)
+        logits, loss = model(xb, yb)
         loss.backward()
         optimizer.step()
         torch.cuda.synchronize()
         t1 = time.time()
         elapsed_ms = (t1 - t0)*1000
         tokens_per_sec = (xb.size(0) * xb.size(1)) / (t1 - t0)
-        print(f"Step {step}, Loss: {loss.item()}, elapsed: {elapsed_ms:.2f}ms, tok/sec: {tokens_per_sec:.2f}")
+        print(f"Step {step}, Loss: {loss.item()}, elapsed: {elapsed_ms:.2f}ms, tokens/s: {tokens_per_sec:.2f}")
 
     def get_next_batch(self):
         buf = self.token_ids[self.position : self.position+self.batch_size*self.ctx_length+1]
@@ -218,8 +219,8 @@ trainer = ModelTrainer(batch_size=16, ctx_length=1024, token_ids=data)
 config = GPTConfig(ctx_length=1024, emb_size=768, block_count=12, head_count=12, vocab_size=encoder.n_vocab)
 model = GPT(config)
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
-# compiled_model = torch.compile(model)
-trainer.train(model, step_count=50, optimizer=optimizer)
+compiled_model = torch.compile(model)
+trainer.train(compiled_model, step_count=50, optimizer=optimizer)
 
 # torch.manual_seed(42)
 # torch.cuda.manual_seed(42)

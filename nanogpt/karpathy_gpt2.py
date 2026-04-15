@@ -1,6 +1,4 @@
 import math
-import os
-from pathlib import Path
 from dataclasses import dataclass
 import torch
 import torch.nn as nn
@@ -130,14 +128,8 @@ class GPT(nn.Module):
         logits = self.lm_head(x) # (B, T, vocab_size)
         loss = None
         if targets is not None:
-            loss = self.get_loss(logits, targets)
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
         return logits, loss
-
-    def get_loss(self, logits, targets):
-        B, T, C = logits.shape
-        logits = logits.view(B*T, C)
-        targets = targets.view(B*T)
-        return F.cross_entropy(logits, targets)
 
     @classmethod
     def from_pretrained(cls, model_type):
@@ -232,24 +224,27 @@ elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
 print(f"using device: {device}")
 
 torch.set_default_device(device)
+torch.use_deterministic_algorithms(True)
+
 torch.manual_seed(1337)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(1337)
 
-torch.set_float32_matmul_precision('high')
-torch.use_deterministic_algorithms(True)
-
 train_loader = DataLoaderLite(B=16, T=1024)
+
+torch.set_float32_matmul_precision('high')
 
 # get logits
 model = GPT(GPTConfig())
-# model = torch.compile(model)
+model.to(device)
+model = torch.compile(model)
 
 # optimize!
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
 for i in range(50):
     t0 = time.time()
     x, y = train_loader.next_batch()
+    x, y = x.to(device), y.to(device)
     optimizer.zero_grad()
     logits, loss = model(x, y)
     loss.backward()
