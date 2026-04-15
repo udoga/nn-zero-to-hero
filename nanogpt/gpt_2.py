@@ -182,7 +182,8 @@ class ModelTrainer:
         t0 = time.time()
         xb, yb = self.get_next_batch()
         optimizer.zero_grad()
-        logits, loss = model(xb, yb)
+        with torch.autocast(device_type=device, dtype=torch.bfloat16):
+            logits, loss = model(xb, yb)
         loss.backward()
         optimizer.step()
         torch.cuda.synchronize()
