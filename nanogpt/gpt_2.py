@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import cast
 from transformers import GPT2LMHeadModel
 import tiktoken
+import time
 
 import torch
 import torch.nn as nn
@@ -10,7 +11,7 @@ from torch.nn import functional as F
 
 @dataclass
 class GPTConfig:
-    ctx_size: int = 1024
+    ctx_length: int = 1024
     vocab_size: int = 50257
     block_count: int = 12
     head_count: int = 12
@@ -25,7 +26,7 @@ class GPTConfig:
             "gpt2-large": dict(block_count=36, head_count=20, emb_size=1280),
             "gpt2-xl": dict(block_count=48, head_count=25, emb_size=1600),
         }[model_type]
-        return cls(vocab_size=50257, ctx_size=1024, **config_args)
+        return cls(vocab_size=50257, ctx_length=1024, **config_args)
 
 
 class CausalSelfAttention(nn.Module):
@@ -36,7 +37,8 @@ class CausalSelfAttention(nn.Module):
         self.emb_size = c.emb_size
         self.qkv_projection = nn.Linear(c.emb_size, 3 * c.emb_size)
         self.output_projection = nn.Linear(c.emb_size, c.emb_size)
-        self.register_buffer("tril", torch.tril(torch.ones(c.ctx_size, c.ctx_size)), persistent=False)
+        self.output_projection.NANOGPT_SCALE_INIT = True
+        self.register_buffer("tril", torch.tril(torch.ones(c.ctx_length, c.ctx_length)), persistent=False)
 
     def to_heads(self, x, B, T, C):
         return x.view(B, T, self.head_count, C // self.head_count).transpose(1, 2)
@@ -60,7 +62,7 @@ class FeedForward(nn.Sequential):
             nn.Linear(c.emb_size, 4 * c.emb_size),
             nn.GELU(approximate="tanh"),
             nn.Linear(4 * c.emb_size, c.emb_size))
-
+        self[2].NANOGPT_SCALE_INIT = True
 
 class Block(nn.Module):
     def __init__(self, c: GPTConfig):
@@ -81,33 +83,12 @@ class GPT(nn.Module):
         super().__init__()
         self.config = c
         self.token_embedding = nn.Embedding(c.vocab_size, c.emb_size)
-        self.position_embedding = nn.Embedding(c.ctx_size, c.emb_size)
+        self.position_embedding = nn.Embedding(c.ctx_length, c.emb_size)
         self.blocks = nn.ModuleList([Block(c) for _ in range(c.block_count)])
         self.final_norm = nn.LayerNorm(c.emb_size)
         self.unembedding = nn.Linear(c.emb_size, c.vocab_size, bias=False)
         self.token_embedding.weight = self.unembedding.weight
         self.apply(self.initialize_weights)
-
-    def fit(self, train_data, batch_size, step_count, optimizer):
-        self.train()
-        for step in range(step_count):
-            self.step(step, train_data, batch_size, optimizer)
-        self.eval()
-
-    def step(self, step, train_data, batch_size, optimizer):
-        xb, yb = self.get_batch(train_data, batch_size)
-        logits = self(xb)
-        loss = self.get_loss(logits, yb)
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        optimizer.step()
-        print(f"Step {step}, Loss: {loss.item()}")
-
-    def get_batch(self, data, batch_size):
-        indices = torch.randint(len(data) - self.config.ctx_size, (batch_size,))
-        x = torch.stack([data[i:i+self.config.ctx_size] for i in indices])
-        y = torch.stack([data[i+1:i+self.config.ctx_size+1] for i in indices])
-        return x, y
 
     def forward(self, token_ids):
         B, T = token_ids.size()                                                       # (B, T)
@@ -127,11 +108,11 @@ class GPT(nn.Module):
     @torch.no_grad()
     def generate(self, token_ids, new_token_count):
         for _ in range(new_token_count):
-            context_token_ids = token_ids[:, -self.config.ctx_size:]               # (B, T)
-            logits = self(context_token_ids)                                       # (B, T, vocab_size)
+            ctx_token_ids = token_ids[:, -self.config.ctx_length:]                 # (B, T)
+            logits = self(ctx_token_ids)                                           # (B, T, vocab_size)
             next_token_logits = logits[:, -1, :]                                   # (B, vocab_size)
             next_token_probs = F.softmax(next_token_logits, dim=-1)                # (B, vocab_size)
-            topk_probs, topk_indices = torch.topk(next_token_probs, k=50, dim=-1)  # (B, 10) each
+            topk_probs, topk_indices = torch.topk(next_token_probs, k=50, dim=-1)  # (B, k) each
             next_token_indices = torch.multinomial(topk_probs, num_samples=1)      # (B, 1)
             next_token_ids = torch.gather(topk_indices, -1, next_token_indices)    # (B, 1)
             token_ids = torch.cat((token_ids, next_token_ids), dim=1)              # (B, T+1)
@@ -172,32 +153,77 @@ class GPT(nn.Module):
 
     def initialize_weights(self, module):
         if isinstance(module, nn.Linear):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02*(2*self.config.block_count)**-0.5)
-        if isinstance(module, nn.Embedding):
+            std = 0.02
+            if hasattr(module, 'NANOGPT_SCALE_INIT'):
+                std *= (2 * self.config.block_count) ** -0.5
+            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
-        if isinstance(module, nn.Linear) and module.bias is not None:
-            torch.nn.init.zeros_(module.bias)
 
-def train_model(encoder):
-    data_path = Path(__file__).resolve().parent.parent / 'data' / 'shakespeare.txt'
-    text = data_path.read_text()[:1000]
-    data = torch.tensor(encoder.encode(text), dtype=torch.long)
-    train_size = int(0.9 * len(data))
-    train_data, _ = data[:train_size], data[train_size:]
-    config = GPTConfig(ctx_size=32, emb_size=768, block_count=12, head_count=12, vocab_size=encoder.n_vocab)
-    model = GPT(config)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
-    model.fit(train_data, batch_size=4, step_count=50, optimizer=optimizer)
-    return model.eval()
 
-torch.manual_seed(1337)
-torch.set_float32_matmul_precision('high')
-torch.set_default_device('cuda' if torch.cuda.is_available() else 'cpu')
+class ModelTrainer:
+    def __init__(self, batch_size, ctx_length, token_ids):
+        self.batch_size = batch_size
+        self.ctx_length = ctx_length
+        self.token_ids = token_ids
+        self.position = 0
+
+    def train(self, model, step_count, optimizer):
+        model.train()
+        for step in range(step_count):
+            self.step(model, step, optimizer)
+        model.eval()
+
+    def step(self, model, step, optimizer):
+        t0 = time.time()
+        xb, yb = self.get_next_batch()
+        optimizer.zero_grad()
+        logits = model(xb)
+        loss = model.get_loss(logits, yb)
+        loss.backward()
+        optimizer.step()
+        torch.cuda.synchronize()
+        t1 = time.time()
+        elapsed_ms = (t1 - t0)*1000
+        tokens_per_sec = (xb.size(0) * xb.size(1)) / (t1 - t0)
+        print(f"Step {step}, Loss: {loss.item()}, elapsed: {elapsed_ms:.2f}ms, tok/sec: {tokens_per_sec:.2f}")
+
+    def get_next_batch(self):
+        buf = self.token_ids[self.position : self.position+self.batch_size*self.ctx_length+1]
+        x = (buf[:-1]).view(self.batch_size, self.ctx_length)
+        y = (buf[1:]).view(self.batch_size, self.ctx_length)
+        self.update_position()
+        return x, y
+
+    def update_position(self):
+        self.position += self.batch_size * self.ctx_length
+        if self.position + (self.batch_size * self.ctx_length + 1) > len(self.token_ids):
+            self.position = 0
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+torch.set_default_device(device)
 print("Device:", torch.get_default_device())
+torch.manual_seed(1337)
+if torch.cuda.is_available(): torch.cuda.manual_seed(1337)
+torch.set_float32_matmul_precision('high')
+torch.use_deterministic_algorithms(True)
 
+data_path = Path(__file__).resolve().parent.parent / 'data' / 'shakespeare.txt'
+text = data_path.read_text()
 encoder = tiktoken.get_encoding("gpt2")
-model = train_model(encoder) # or GPT.from_pretrained("gpt2")
-prompt = "Hello, I'm a language model,"
-input_token_ids = torch.tensor(encoder.encode(prompt), dtype=torch.long)
-output_token_ids = model.generate(input_token_ids.unsqueeze(0), new_token_count=32)[0]
-print(encoder.decode(output_token_ids.tolist()))
+data = torch.tensor(encoder.encode(text), dtype=torch.long)
+trainer = ModelTrainer(batch_size=16, ctx_length=1024, token_ids=data)
+config = GPTConfig(ctx_length=1024, emb_size=768, block_count=12, head_count=12, vocab_size=encoder.n_vocab)
+model = GPT(config)
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+# compiled_model = torch.compile(model)
+trainer.train(model, step_count=50, optimizer=optimizer)
+
+# torch.manual_seed(42)
+# torch.cuda.manual_seed(42)
+# prompt = "Hello, I'm a language model,"
+# input_token_ids = torch.tensor(encoder.encode(prompt), dtype=torch.long)
+# output_token_ids = model.generate(input_token_ids.unsqueeze(0), new_token_count=30)[0]
+# print(encoder.decode(output_token_ids.tolist()))
