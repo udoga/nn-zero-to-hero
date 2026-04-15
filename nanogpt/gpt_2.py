@@ -44,16 +44,13 @@ class CausalSelfAttention(nn.Module):
         return x.view(B, T, self.head_count, C // self.head_count).transpose(1, 2)
 
     def forward(self, x):
-        B, T, C = x.size()                                                                  # (B, T, C)
-        qkv = self.qkv_projection(x)                                                        # (B, T, 3 * C)
-        q, k, v = qkv.split(self.emb_size, dim=2)                                           # (B, T, C) each
-        q, k, v = [self.to_heads(part, B, T, C) for part in (q, k, v)]                      # (B, HC, T, HS) each
-        A = (q @ k.transpose(-2, -1)) / (k.shape[-1] ** 0.5)                                # (B, HC, T, T)
-        A = A.masked_fill(cast(torch.Tensor, self.tril)[:T, :T] == 0, float("-inf"))        # (B, HC, T, T)
-        A = F.softmax(A, dim=-1)                                                            # (B, HC, T, T)
-        y = A @ v                                                                           # (B, HC, T, HS)
-        y = y.transpose(1, 2).contiguous().view(B, T, C)                                    # (B, T, C)
-        return self.output_projection(y)                                                    # (B, T, C)
+        B, T, C = x.size()                                                # (B, T, C)
+        qkv = self.qkv_projection(x)                                      # (B, T, 3 * C)
+        q, k, v = qkv.split(self.emb_size, dim=2)                         # (B, T, C) each
+        q, k, v = [self.to_heads(part, B, T, C) for part in (q, k, v)]    # (B, HC, T, HS) each
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True)       # (B, T, C) # flash attention
+        y = y.transpose(1, 2).contiguous().view(B, T, C)                  # (B, T, C)
+        return self.output_projection(y)                                  # (B, T, C)
 
 
 class FeedForward(nn.Sequential):
