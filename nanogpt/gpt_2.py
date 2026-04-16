@@ -154,6 +154,13 @@ class GPT(nn.Module):
         key = key.replace("lm_head.", "unembedding.")
         return key
 
+    def get_param_groups(self, w_decay):
+        param_dict = {n: p for n, p in self.named_parameters() if p.requires_grad}
+        one_dim_params = [p for n, p in param_dict.items() if p.dim() < 2]
+        multi_dim_params = [p for n, p in param_dict.items() if p.dim() >= 2]
+        return [{'params': multi_dim_params, 'weight_decay': w_decay},
+                {'params': one_dim_params, 'weight_decay': 0.0}]
+
     def initialize_weights(self, m: nn.Module):
         if isinstance(m, nn.Linear) and m.bias is not None:
             torch.nn.init.zeros_(m.bias)
@@ -238,7 +245,7 @@ if __name__ == "__main__":
     trainer = ModelTrainer(batch_size=16, ctx_length=1024, token_ids=data, step_count=50)
     config = GPTConfig(ctx_length=1024, emb_size=768, block_count=12, head_count=12, vocab_size=50304)
     model = GPT(config)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
+    optimizer = torch.optim.AdamW(model.get_param_groups(w_decay=0.1), lr=3e-4, betas=(0.9, 0.95), eps=1e-8, fused=True)
     compiled_model = torch.compile(model)
     trainer.train(compiled_model, optimizer=optimizer)
 
