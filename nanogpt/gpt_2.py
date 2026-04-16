@@ -171,12 +171,17 @@ class GPT(nn.Module):
 
 
 class ModelTrainer:
-    def __init__(self, batch_size, ctx_length, token_ids, step_count):
-        self.batch_size = batch_size
+    def __init__(self, step_token_count, microbatch_size, ctx_length, token_ids, step_count):
+        self.step_token_count = step_token_count
+        self.microbatch_size = microbatch_size
         self.ctx_length = ctx_length
         self.token_ids = token_ids
         self.step_count = step_count
         self.position = 0
+        self.microstep_token_count = microbatch_size * ctx_length
+        assert step_token_count % self.microstep_token_count == 0
+        self.microstep_count = step_token_count // self.microstep_token_count
+        print("Calculated microstep count:", self.microstep_count)
 
     def train(self, model, optimizer):
         model.train()
@@ -190,21 +195,28 @@ class ModelTrainer:
         torch.cuda.synchronize()
         t1 = time.time()
         elapsed_ms = (t1 - t0)*1000
-        tokens_per_sec = (self.batch_size * self.ctx_length) / (t1 - t0)
-        print(f"step: {step:4d} | loss: {loss.item():.6f} | norm: {norm.item():.4f} | lr: {lr:.4e} | "
+        tokens_per_sec = self.step_token_count / (t1 - t0)
+        print(f"step: {step:4d} | loss: {loss:.6f} | norm: {norm.item():.4f} | lr: {lr:.4e} | "
               f"elapsed: {elapsed_ms:.2f}ms | tokens/s: {tokens_per_sec:.2f}")
 
     def step(self, model, step, optimizer):
-        xb, yb = self.get_next_batch()
         optimizer.zero_grad()
-        with torch.autocast(device_type=device, dtype=torch.bfloat16):
-            _, loss = model(xb, yb)
-        loss.backward()
+        loss = 0.0
+        for _ in range(self.microstep_count):
+            loss += self.microstep(model)
         norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         lr = self.get_lr(step)
         for g in optimizer.param_groups: g['lr'] = lr
         optimizer.step()
         return loss, norm, lr
+
+    def microstep(self, model):
+        xb, yb = self.get_next_batch()
+        with torch.autocast(device_type=device, dtype=torch.bfloat16):
+            _, loss = model(xb, yb)
+        loss /= self.microstep_count
+        loss.backward()
+        return loss.detach()
 
     def get_lr(self, step):
         max_lr = 6e-4
@@ -218,15 +230,15 @@ class ModelTrainer:
         return min_lr + coeff * (max_lr - min_lr)
 
     def get_next_batch(self):
-        buf = self.token_ids[self.position : self.position+self.batch_size*self.ctx_length+1]
-        x = (buf[:-1]).view(self.batch_size, self.ctx_length)
-        y = (buf[1:]).view(self.batch_size, self.ctx_length)
+        buf = self.token_ids[self.position : self.position+self.microbatch_size*self.ctx_length+1]
+        x = (buf[:-1]).view(self.microbatch_size, self.ctx_length)
+        y = (buf[1:]).view(self.microbatch_size, self.ctx_length)
         self.update_position()
         return x, y
 
     def update_position(self):
-        self.position += self.batch_size * self.ctx_length
-        if self.position + (self.batch_size * self.ctx_length + 1) > len(self.token_ids):
+        self.position += self.microbatch_size * self.ctx_length
+        if self.position + (self.microbatch_size * self.ctx_length + 1) > len(self.token_ids):
             self.position = 0
 
 
@@ -242,7 +254,7 @@ if __name__ == "__main__":
     text = data_path.read_text()
     encoder = tiktoken.get_encoding("gpt2")
     data = torch.tensor(encoder.encode(text), dtype=torch.long)
-    trainer = ModelTrainer(batch_size=16, ctx_length=1024, token_ids=data, step_count=50)
+    trainer = ModelTrainer(step_token_count=524288, microbatch_size=16, ctx_length=1024, token_ids=data, step_count=50)
     config = GPTConfig(ctx_length=1024, emb_size=768, block_count=12, head_count=12, vocab_size=50304)
     model = GPT(config)
     optimizer = torch.optim.AdamW(model.get_param_groups(w_decay=0.1), lr=3e-4, betas=(0.9, 0.95), eps=1e-8, fused=True)
