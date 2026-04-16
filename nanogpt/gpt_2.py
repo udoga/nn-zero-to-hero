@@ -111,7 +111,7 @@ class GPT(nn.Module):
     def generate(self, token_ids, new_token_count):
         for _ in range(new_token_count):
             ctx_token_ids = token_ids[:, -self.config.ctx_length:]                 # (B, T)
-            logits = self(ctx_token_ids)                                           # (B, T, vocab_size)
+            logits, _ = self(ctx_token_ids)                                        # (B, T, vocab_size)
             next_token_logits = logits[:, -1, :]                                   # (B, vocab_size)
             next_token_probs = F.softmax(next_token_logits, dim=-1)                # (B, vocab_size)
             topk_probs, topk_indices = torch.topk(next_token_probs, k=50, dim=-1)  # (B, k) each
@@ -172,22 +172,26 @@ class ModelTrainer:
     def train(self, model, step_count, optimizer):
         model.train()
         for step in range(step_count):
-            self.step(model, step, optimizer)
+            self.step_and_measure(model, step, optimizer)
         model.eval()
 
-    def step(self, model, step, optimizer):
+    def step_and_measure(self, model, step, optimizer):
         t0 = time.time()
-        xb, yb = self.get_next_batch()
-        optimizer.zero_grad()
-        with torch.autocast(device_type=device, dtype=torch.bfloat16):
-            logits, loss = model(xb, yb)
-        loss.backward()
-        optimizer.step()
+        loss = self.step(model, optimizer)
         torch.cuda.synchronize()
         t1 = time.time()
         elapsed_ms = (t1 - t0)*1000
-        tokens_per_sec = (xb.size(0) * xb.size(1)) / (t1 - t0)
-        print(f"Step {step}, Loss: {loss.item()}, elapsed: {elapsed_ms:.2f}ms, tokens/s: {tokens_per_sec:.2f}")
+        tokens_per_sec = (self.batch_size * self.ctx_length) / (t1 - t0)
+        print(f"step: {step}, loss: {loss.item()}, elapsed: {elapsed_ms:.2f}ms, tokens/s: {tokens_per_sec:.2f}")
+
+    def step(self, model, optimizer):
+        xb, yb = self.get_next_batch()
+        optimizer.zero_grad()
+        with torch.autocast(device_type=device, dtype=torch.bfloat16):
+            _, loss = model(xb, yb)
+        loss.backward()
+        optimizer.step()
+        return loss
 
     def get_next_batch(self):
         buf = self.token_ids[self.position : self.position+self.batch_size*self.ctx_length+1]
@@ -201,12 +205,12 @@ class ModelTrainer:
         if self.position + (self.batch_size * self.ctx_length + 1) > len(self.token_ids):
             self.position = 0
 
+
 if __name__ == "__main__":
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    print("Device:", device)
     torch.set_default_device(device)
-    print("Device:", torch.get_default_device())
     torch.manual_seed(1337)
-    if torch.cuda.is_available(): torch.cuda.manual_seed(1337)
     torch.set_float32_matmul_precision('high')
     torch.use_deterministic_algorithms(True)
 
@@ -215,15 +219,14 @@ if __name__ == "__main__":
     encoder = tiktoken.get_encoding("gpt2")
     data = torch.tensor(encoder.encode(text), dtype=torch.long)
     trainer = ModelTrainer(batch_size=16, ctx_length=1024, token_ids=data)
-    config = GPTConfig(ctx_length=1024, emb_size=768, block_count=12, head_count=12, vocab_size=encoder.n_vocab)
+    config = GPTConfig(ctx_length=1024, emb_size=768, block_count=12, head_count=12, vocab_size=50304)
     model = GPT(config)
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
     compiled_model = torch.compile(model)
     trainer.train(compiled_model, step_count=50, optimizer=optimizer)
 
-    # torch.manual_seed(42)
-    # torch.cuda.manual_seed(42)
-    # prompt = "Hello, I'm a language model,"
-    # input_token_ids = torch.tensor(encoder.encode(prompt), dtype=torch.long)
-    # output_token_ids = model.generate(input_token_ids.unsqueeze(0), new_token_count=30)[0]
-    # print(encoder.decode(output_token_ids.tolist()))
+    torch.manual_seed(42)
+    prompt = "Hello, I'm a language model,"
+    input_token_ids = torch.tensor(encoder.encode(prompt), dtype=torch.long)
+    output_token_ids = model.generate(input_token_ids.unsqueeze(0), new_token_count=30)[0]
+    print(encoder.decode(output_token_ids.tolist()))
