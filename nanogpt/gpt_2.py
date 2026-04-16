@@ -4,6 +4,7 @@ from typing import cast
 from transformers import GPT2LMHeadModel
 import tiktoken
 import time
+import math
 
 import torch
 import torch.nn as nn
@@ -163,37 +164,51 @@ class GPT(nn.Module):
 
 
 class ModelTrainer:
-    def __init__(self, batch_size, ctx_length, token_ids):
+    def __init__(self, batch_size, ctx_length, token_ids, step_count):
         self.batch_size = batch_size
         self.ctx_length = ctx_length
         self.token_ids = token_ids
+        self.step_count = step_count
         self.position = 0
 
-    def train(self, model, step_count, optimizer):
+    def train(self, model, optimizer):
         model.train()
-        for step in range(step_count):
+        for step in range(self.step_count):
             self.step_and_measure(model, step, optimizer)
         model.eval()
 
     def step_and_measure(self, model, step, optimizer):
         t0 = time.time()
-        loss, norm = self.step(model, optimizer)
+        loss, norm, lr = self.step(model, step, optimizer)
         torch.cuda.synchronize()
         t1 = time.time()
         elapsed_ms = (t1 - t0)*1000
         tokens_per_sec = (self.batch_size * self.ctx_length) / (t1 - t0)
-        print(f"step: {step:4d} | loss: {loss.item():.6f} | norm: {norm.item():.4f} | "
+        print(f"step: {step:4d} | loss: {loss.item():.6f} | norm: {norm.item():.4f} | lr: {lr:.4e} | "
               f"elapsed: {elapsed_ms:.2f}ms | tokens/s: {tokens_per_sec:.2f}")
 
-    def step(self, model, optimizer):
+    def step(self, model, step, optimizer):
         xb, yb = self.get_next_batch()
         optimizer.zero_grad()
         with torch.autocast(device_type=device, dtype=torch.bfloat16):
             _, loss = model(xb, yb)
         loss.backward()
         norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        lr = self.get_lr(step)
+        for g in optimizer.param_groups: g['lr'] = lr
         optimizer.step()
-        return loss, norm
+        return loss, norm, lr
+
+    def get_lr(self, step):
+        max_lr = 6e-4
+        min_lr = max_lr * 0.1
+        warmup_steps = 10
+        if step < warmup_steps:  return max_lr * (step+1) / warmup_steps
+        if step > self.step_count: return min_lr
+        decay_ratio = (step - warmup_steps) / (self.step_count - warmup_steps)
+        assert 0 <= decay_ratio <= 1
+        coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff starts at 1 and goes to 0
+        return min_lr + coeff * (max_lr - min_lr)
 
     def get_next_batch(self):
         buf = self.token_ids[self.position : self.position+self.batch_size*self.ctx_length+1]
@@ -220,12 +235,12 @@ if __name__ == "__main__":
     text = data_path.read_text()
     encoder = tiktoken.get_encoding("gpt2")
     data = torch.tensor(encoder.encode(text), dtype=torch.long)
-    trainer = ModelTrainer(batch_size=16, ctx_length=1024, token_ids=data)
+    trainer = ModelTrainer(batch_size=16, ctx_length=1024, token_ids=data, step_count=50)
     config = GPTConfig(ctx_length=1024, emb_size=768, block_count=12, head_count=12, vocab_size=50304)
     model = GPT(config)
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
     compiled_model = torch.compile(model)
-    trainer.train(compiled_model, step_count=50, optimizer=optimizer)
+    trainer.train(compiled_model, optimizer=optimizer)
 
     torch.manual_seed(42)
     prompt = "Hello, I'm a language model,"
