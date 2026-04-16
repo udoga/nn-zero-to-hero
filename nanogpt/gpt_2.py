@@ -177,12 +177,13 @@ class ModelTrainer:
 
     def step_and_measure(self, model, step, optimizer):
         t0 = time.time()
-        loss = self.step(model, optimizer)
+        loss, norm = self.step(model, optimizer)
         torch.cuda.synchronize()
         t1 = time.time()
         elapsed_ms = (t1 - t0)*1000
         tokens_per_sec = (self.batch_size * self.ctx_length) / (t1 - t0)
-        print(f"step: {step}, loss: {loss.item()}, elapsed: {elapsed_ms:.2f}ms, tokens/s: {tokens_per_sec:.2f}")
+        print(f"step: {step:4d} | loss: {loss.item():.6f} | norm: {norm.item():.4f} | "
+              f"elapsed: {elapsed_ms:.2f}ms | tokens/s: {tokens_per_sec:.2f}")
 
     def step(self, model, optimizer):
         xb, yb = self.get_next_batch()
@@ -190,8 +191,9 @@ class ModelTrainer:
         with torch.autocast(device_type=device, dtype=torch.bfloat16):
             _, loss = model(xb, yb)
         loss.backward()
+        norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
-        return loss
+        return loss, norm
 
     def get_next_batch(self):
         buf = self.token_ids[self.position : self.position+self.batch_size*self.ctx_length+1]
@@ -221,7 +223,7 @@ if __name__ == "__main__":
     trainer = ModelTrainer(batch_size=16, ctx_length=1024, token_ids=data)
     config = GPTConfig(ctx_length=1024, emb_size=768, block_count=12, head_count=12, vocab_size=50304)
     model = GPT(config)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
     compiled_model = torch.compile(model)
     trainer.train(compiled_model, step_count=50, optimizer=optimizer)
 
