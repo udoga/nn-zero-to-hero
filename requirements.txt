@@ -6,3 +6,5 @@ ipykernel
 transformers
 tiktoken
 pytest
+datasets
+tqdm
