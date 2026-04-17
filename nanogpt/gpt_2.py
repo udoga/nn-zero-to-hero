@@ -1,11 +1,13 @@
-from dataclasses import dataclass
 import os
+import time
+import math
+import numpy as np
+import tiktoken
+
+from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 from transformers import GPT2LMHeadModel
-import tiktoken
-import time
-import math
 
 import torch
 import torch.nn as nn
@@ -173,18 +175,24 @@ class GPT(nn.Module):
 
 
 class DataLoader:
-    def __init__(self, process_rank, process_count, token_ids, batch_size, ctx_length):
+    def __init__(self, process_rank, process_count, folder, split, batch_size, ctx_length):
+        self.process_rank = process_rank
         self.process_count = process_count
-        self.token_ids = token_ids
+        self.file_paths = sorted([os.path.join(folder, f) for f in os.listdir(folder) if split in f])
         self.batch_size = batch_size
         self.ctx_length = ctx_length
-        self.initial_position = batch_size * ctx_length * process_rank
-        self.position = self.initial_position
+        self.load_file(index=0)
+
+    def load_file(self, index):
+        assert index < len(self.file_paths), f"File index {index} is out of bounds for {len(self.file_paths)} files"
+        self.file_index = index
+        self.token_ids = torch.tensor(np.load(self.file_paths[index]), dtype=torch.long)
+        self.position = self.batch_size * self.ctx_length * self.process_rank
 
     def get_next_batch(self):
-        buf = self.token_ids[self.position : self.position+self.batch_size*self.ctx_length+1]
-        x = (buf[:-1]).view(self.batch_size, self.ctx_length)
-        y = (buf[1:]).view(self.batch_size, self.ctx_length)
+        buffer = self.token_ids[self.position : self.position + self.batch_size*self.ctx_length + 1]
+        x = (buffer[:-1]).view(self.batch_size, self.ctx_length)
+        y = (buffer[1:]).view(self.batch_size, self.ctx_length)
         self.update_position()
         return x, y
 
@@ -192,16 +200,17 @@ class DataLoader:
         increment = self.batch_size * self.ctx_length * self.process_count
         self.position += increment
         if self.position + (increment + 1) > len(self.token_ids):
-            self.position = self.initial_position
+            self.load_file((self.file_index + 1) % len(self.file_paths))
 
 
 class GPTTrainer:
-    def __init__(self, process_rank, process_count, data_loader, step_token_count, step_count):
+    def __init__(self, process_rank, process_count, loader, step_token_count, step_count, warmup_steps):
         self.process_rank = process_rank
         self.process_count = process_count
-        self.data_loader = data_loader
+        self.loader = loader
         self.step_token_count = step_token_count
         self.step_count = step_count
+        self.warmup_steps = warmup_steps
         self.microstep_count = self.get_microstep_count()
 
     def train(self, model, optimizer):
@@ -242,7 +251,7 @@ class GPTTrainer:
         return loss
 
     def microstep(self, model, microstep):
-        xb, yb = self.data_loader.get_next_batch()
+        xb, yb = self.loader.get_next_batch()
         with torch.autocast(device_type=device, dtype=torch.bfloat16):
             _, loss = model(xb, yb)
         loss /= self.microstep_count
@@ -254,16 +263,15 @@ class GPTTrainer:
     def get_lr(self, step):
         max_lr = 6e-4
         min_lr = max_lr * 0.1
-        warmup_steps = 10
-        if step < warmup_steps:  return max_lr * (step+1) / warmup_steps
+        if step < self.warmup_steps:  return max_lr * (step+1) / self.warmup_steps
         if step > self.step_count: return min_lr
-        decay_ratio = (step - warmup_steps) / (self.step_count - warmup_steps)
+        decay_ratio = (step - self.warmup_steps) / (self.step_count - self.warmup_steps)
         assert 0 <= decay_ratio <= 1
         coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff starts at 1 and goes to 0
         return min_lr + coeff * (max_lr - min_lr)
 
     def get_microstep_count(self):
-        microstep_token_count = self.data_loader.batch_size * self.data_loader.ctx_length * self.process_count
+        microstep_token_count = self.loader.batch_size * self.loader.ctx_length * self.process_count
         assert self.step_token_count % microstep_token_count == 0
         return self.step_token_count // microstep_token_count
 
@@ -281,14 +289,12 @@ if __name__ == "__main__":
     torch.set_float32_matmul_precision('high')
     torch.use_deterministic_algorithms(True)
 
-    path = Path(__file__).resolve().parent.parent / 'data' / 'shakespeare.txt'
-    text = path.read_text()
+    folder = Path(__file__).resolve().parent.parent / 'data' / 'edu_fineweb10B'
     encoder = tiktoken.get_encoding("gpt2")
-    token_ids = torch.tensor(encoder.encode(text), dtype=torch.long)
     config = GPTConfig(ctx_length=1024, emb_size=768, block_count=12, head_count=12, vocab_size=50304)
     model = GPT(config)
-    data_loader = DataLoader(process_rank, process_count, token_ids, batch_size=16, ctx_length=1024)
-    trainer = GPTTrainer(process_rank, process_count, data_loader, step_token_count=524288, step_count=50)
+    loader = DataLoader(process_rank, process_count, folder, split='train', batch_size=16, ctx_length=1024)
+    trainer = GPTTrainer(process_rank, process_count, loader, step_token_count=524288, step_count=19073, warmup_steps=715)
     optimizer = torch.optim.AdamW(model.get_param_groups(w_decay=0.1), lr=3e-4, betas=(0.9, 0.95), eps=1e-8, fused=True)
     compiled_model = torch.compile(model)
     trained_model = DDP(compiled_model, device_ids=[local_rank]) if process_count > 1 else compiled_model
