@@ -170,18 +170,32 @@ class GPT(nn.Module):
             torch.nn.init.normal_(m.weight, mean=0.0, std=0.02)
 
 
-class ModelTrainer:
-    def __init__(self, step_token_count, microbatch_size, ctx_length, token_ids, step_count):
-        self.step_token_count = step_token_count
-        self.microbatch_size = microbatch_size
-        self.ctx_length = ctx_length
+class DataLoader:
+    def __init__(self, token_ids, batch_size, ctx_length):
         self.token_ids = token_ids
-        self.step_count = step_count
+        self.batch_size = batch_size
+        self.ctx_length = ctx_length
         self.position = 0
-        self.microstep_token_count = microbatch_size * ctx_length
-        assert step_token_count % self.microstep_token_count == 0
-        self.microstep_count = step_token_count // self.microstep_token_count
-        print("Calculated microstep count:", self.microstep_count)
+
+    def get_next_batch(self):
+        buf = self.token_ids[self.position : self.position+self.batch_size*self.ctx_length+1]
+        x = (buf[:-1]).view(self.batch_size, self.ctx_length)
+        y = (buf[1:]).view(self.batch_size, self.ctx_length)
+        self.update_position()
+        return x, y
+
+    def update_position(self):
+        self.position += self.batch_size * self.ctx_length
+        if self.position + (self.batch_size * self.ctx_length + 1) > len(self.token_ids):
+            self.position = 0
+
+
+class GPTTrainer:
+    def __init__(self, loader, step_token_count, step_count):
+        self.loader = loader
+        self.step_token_count = step_token_count
+        self.step_count = step_count
+        self.microstep_count = self.calculate_microstep_count()
 
     def train(self, model, optimizer):
         model.train()
@@ -211,7 +225,7 @@ class ModelTrainer:
         return loss, norm, lr
 
     def microstep(self, model):
-        xb, yb = self.get_next_batch()
+        xb, yb = self.loader.get_next_batch()
         with torch.autocast(device_type=device, dtype=torch.bfloat16):
             _, loss = model(xb, yb)
         loss /= self.microstep_count
@@ -229,17 +243,10 @@ class ModelTrainer:
         coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff starts at 1 and goes to 0
         return min_lr + coeff * (max_lr - min_lr)
 
-    def get_next_batch(self):
-        buf = self.token_ids[self.position : self.position+self.microbatch_size*self.ctx_length+1]
-        x = (buf[:-1]).view(self.microbatch_size, self.ctx_length)
-        y = (buf[1:]).view(self.microbatch_size, self.ctx_length)
-        self.update_position()
-        return x, y
-
-    def update_position(self):
-        self.position += self.microbatch_size * self.ctx_length
-        if self.position + (self.microbatch_size * self.ctx_length + 1) > len(self.token_ids):
-            self.position = 0
+    def calculate_microstep_count(self):
+        microstep_token_count = self.loader.batch_size * self.loader.ctx_length
+        assert self.step_token_count % microstep_token_count == 0
+        return self.step_token_count // microstep_token_count
 
 
 if __name__ == "__main__":
@@ -254,9 +261,10 @@ if __name__ == "__main__":
     text = data_path.read_text()
     encoder = tiktoken.get_encoding("gpt2")
     data = torch.tensor(encoder.encode(text), dtype=torch.long)
-    trainer = ModelTrainer(step_token_count=524288, microbatch_size=16, ctx_length=1024, token_ids=data, step_count=50)
     config = GPTConfig(ctx_length=1024, emb_size=768, block_count=12, head_count=12, vocab_size=50304)
     model = GPT(config)
+    loader = DataLoader(token_ids=data, batch_size=16, ctx_length=1024)
+    trainer = GPTTrainer(loader=loader, step_token_count=524288, step_count=50)
     optimizer = torch.optim.AdamW(model.get_param_groups(w_decay=0.1), lr=3e-4, betas=(0.9, 0.95), eps=1e-8, fused=True)
     compiled_model = torch.compile(model)
     trainer.train(compiled_model, optimizer=optimizer)
