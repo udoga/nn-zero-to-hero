@@ -204,19 +204,26 @@ class DataLoader:
 
 
 class GPTTrainer:
-    def __init__(self, process_rank, process_count, loader, step_token_count, step_count, warmup_steps):
+    def __init__(self, process_rank, process_count, train_loader, val_loader, step_token_count, step_count, warmup_steps):
         self.process_rank = process_rank
         self.process_count = process_count
-        self.loader = loader
+        self.train_loader = train_loader
+        self.val_loader = val_loader
         self.step_token_count = step_token_count
         self.step_count = step_count
         self.warmup_steps = warmup_steps
         self.microstep_count = self.get_microstep_count()
 
+    def get_microstep_count(self):
+        microstep_token_count = self.train_loader.batch_size * self.train_loader.ctx_length * self.process_count
+        assert self.step_token_count % microstep_token_count == 0
+        return self.step_token_count // microstep_token_count
+
     def train(self, model, optimizer):
         model.train()
         for step in range(self.step_count):
             self.step_and_measure(model, step, optimizer)
+            if step % 100 == 0: self.evaluate(model)
         model.eval()
 
     def step_and_measure(self, model, step, optimizer):
@@ -230,35 +237,39 @@ class GPTTrainer:
 
     def print_row(self, step, loss, norm, lr, elapsed_ms, tokens_per_sec):
         if self.process_rank == 0:
-            print(f"step: {step:4d} | loss: {loss:.6f} | norm: {norm.item():.4f} | lr: {lr:.4e} | "
+            print(f"step: {step:5d} | loss: {loss:.6f} | norm: {norm.item():.4f} | lr: {lr:.4e} | "
                   f"elapsed: {elapsed_ms:.2f}ms | tokens/s: {tokens_per_sec:.2f}")
 
     def step(self, model, step, optimizer):
         optimizer.zero_grad()
-        loss = self.get_accumulated_loss(model)
+        loss = self.get_accumulated_loss(model, self.train_loader, self.microstep_count)
         norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         lr = self.get_lr(step)
         for g in optimizer.param_groups: g['lr'] = lr
         optimizer.step()
         return loss, norm, lr
 
-    def get_accumulated_loss(self, model):
+    def get_accumulated_loss(self, model, loader, microstep_count):
         loss = 0.0
-        for microstep in range(self.microstep_count):
-            loss += self.microstep(model, microstep)
+        for microstep in range(microstep_count):
+            loss += self.microstep(model, microstep, loader, microstep_count)
         if self.process_count > 1:
             torch.distributed.all_reduce(loss, op=torch.distributed.ReduceOp.AVG)
         return loss
 
-    def microstep(self, model, microstep):
-        xb, yb = self.loader.get_next_batch()
+    def microstep(self, model, microstep, loader, microstep_count):
+        xb, yb = loader.get_next_batch()
         with torch.autocast(device_type=device, dtype=torch.bfloat16):
             _, loss = model(xb, yb)
-        loss /= self.microstep_count
+        loss /= microstep_count
+        if model.training:
+            self.backward(model, loss, microstep)
+        return loss.detach()
+
+    def backward(self, model, loss, microstep):
         if self.process_count > 1:
             model.require_backward_grad_sync = (microstep == self.microstep_count - 1)
         loss.backward()
-        return loss.detach()
 
     def get_lr(self, step):
         max_lr = 6e-4
@@ -270,11 +281,14 @@ class GPTTrainer:
         coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff starts at 1 and goes to 0
         return min_lr + coeff * (max_lr - min_lr)
 
-    def get_microstep_count(self):
-        microstep_token_count = self.loader.batch_size * self.loader.ctx_length * self.process_count
-        assert self.step_token_count % microstep_token_count == 0
-        return self.step_token_count // microstep_token_count
-
+    def evaluate(self, model):
+        model.eval()
+        self.val_loader.load_file(index=0)
+        with torch.no_grad():
+            loss = self.get_accumulated_loss(model, self.val_loader, microstep_count=20)
+        if self.process_rank == 0:
+            print(f"Validation loss: {loss:.6f}")
+        model.train()
 
 if __name__ == "__main__":
     process_rank = int(os.environ.get('RANK', 0))
@@ -293,8 +307,9 @@ if __name__ == "__main__":
     encoder = tiktoken.get_encoding("gpt2")
     config = GPTConfig(ctx_length=1024, emb_size=768, block_count=12, head_count=12, vocab_size=50304)
     model = GPT(config)
-    loader = DataLoader(process_rank, process_count, folder, split='train', batch_size=16, ctx_length=1024)
-    trainer = GPTTrainer(process_rank, process_count, loader, step_token_count=524288, step_count=19073, warmup_steps=715)
+    train_loader = DataLoader(process_rank, process_count, folder, split='train', batch_size=16, ctx_length=1024)
+    val_loader = DataLoader(process_rank, process_count, folder, split='val', batch_size=16, ctx_length=1024)
+    trainer = GPTTrainer(process_rank, process_count, train_loader, val_loader, step_token_count=524288, step_count=19073, warmup_steps=715)
     optimizer = torch.optim.AdamW(model.get_param_groups(w_decay=0.1), lr=3e-4, betas=(0.9, 0.95), eps=1e-8, fused=True)
     compiled_model = torch.compile(model)
     trained_model = DDP(compiled_model, device_ids=[local_rank]) if process_count > 1 else compiled_model
