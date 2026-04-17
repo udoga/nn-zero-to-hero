@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import cast
 from transformers import GPT2LMHeadModel
@@ -9,6 +10,7 @@ import math
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 @dataclass
 class GPTConfig:
@@ -171,11 +173,13 @@ class GPT(nn.Module):
 
 
 class DataLoader:
-    def __init__(self, token_ids, batch_size, ctx_length):
+    def __init__(self, process_rank, process_count, token_ids, batch_size, ctx_length):
+        self.process_count = process_count
         self.token_ids = token_ids
         self.batch_size = batch_size
         self.ctx_length = ctx_length
-        self.position = 0
+        self.initial_position = batch_size * ctx_length * process_rank
+        self.position = self.initial_position
 
     def get_next_batch(self):
         buf = self.token_ids[self.position : self.position+self.batch_size*self.ctx_length+1]
@@ -185,17 +189,20 @@ class DataLoader:
         return x, y
 
     def update_position(self):
-        self.position += self.batch_size * self.ctx_length
-        if self.position + (self.batch_size * self.ctx_length + 1) > len(self.token_ids):
-            self.position = 0
+        increment = self.batch_size * self.ctx_length * self.process_count
+        self.position += increment
+        if self.position + (increment + 1) > len(self.token_ids):
+            self.position = self.initial_position
 
 
 class GPTTrainer:
-    def __init__(self, loader, step_token_count, step_count):
-        self.loader = loader
+    def __init__(self, process_rank, process_count, data_loader, step_token_count, step_count):
+        self.process_rank = process_rank
+        self.process_count = process_count
+        self.data_loader = data_loader
         self.step_token_count = step_token_count
         self.step_count = step_count
-        self.microstep_count = self.calculate_microstep_count()
+        self.microstep_count = self.get_microstep_count()
 
     def train(self, model, optimizer):
         model.train()
@@ -209,26 +216,38 @@ class GPTTrainer:
         torch.cuda.synchronize()
         t1 = time.time()
         elapsed_ms = (t1 - t0)*1000
-        tokens_per_sec = self.step_token_count / (t1 - t0)
-        print(f"step: {step:4d} | loss: {loss:.6f} | norm: {norm.item():.4f} | lr: {lr:.4e} | "
-              f"elapsed: {elapsed_ms:.2f}ms | tokens/s: {tokens_per_sec:.2f}")
+        tokens_per_sec = self.step_token_count * self.process_count / (t1 - t0)
+        self.print_row(step, loss, norm, lr, elapsed_ms, tokens_per_sec)
+
+    def print_row(self, step, loss, norm, lr, elapsed_ms, tokens_per_sec):
+        if self.process_rank == 0:
+            print(f"step: {step:4d} | loss: {loss:.6f} | norm: {norm.item():.4f} | lr: {lr:.4e} | "
+                  f"elapsed: {elapsed_ms:.2f}ms | tokens/s: {tokens_per_sec:.2f}")
 
     def step(self, model, step, optimizer):
         optimizer.zero_grad()
-        loss = 0.0
-        for _ in range(self.microstep_count):
-            loss += self.microstep(model)
+        loss = self.get_accumulated_loss(model)
         norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         lr = self.get_lr(step)
         for g in optimizer.param_groups: g['lr'] = lr
         optimizer.step()
         return loss, norm, lr
 
-    def microstep(self, model):
-        xb, yb = self.loader.get_next_batch()
+    def get_accumulated_loss(self, model):
+        loss = 0.0
+        for microstep in range(self.microstep_count):
+            loss += self.microstep(model, microstep)
+        if self.process_count > 1:
+            torch.distributed.all_reduce(loss, op=torch.distributed.ReduceOp.AVG)
+        return loss
+
+    def microstep(self, model, microstep):
+        xb, yb = self.data_loader.get_next_batch()
         with torch.autocast(device_type=device, dtype=torch.bfloat16):
             _, loss = model(xb, yb)
         loss /= self.microstep_count
+        if self.process_count > 1:
+            model.require_backward_grad_sync = (microstep == self.microstep_count - 1)
         loss.backward()
         return loss.detach()
 
@@ -243,34 +262,40 @@ class GPTTrainer:
         coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff starts at 1 and goes to 0
         return min_lr + coeff * (max_lr - min_lr)
 
-    def calculate_microstep_count(self):
-        microstep_token_count = self.loader.batch_size * self.loader.ctx_length
+    def get_microstep_count(self):
+        microstep_token_count = self.data_loader.batch_size * self.data_loader.ctx_length * self.process_count
         assert self.step_token_count % microstep_token_count == 0
         return self.step_token_count // microstep_token_count
 
 
 if __name__ == "__main__":
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print("Device:", device)
+    process_rank = int(os.environ.get('RANK', 0))
+    local_rank = int(os.environ.get('LOCAL_RANK', 0))
+    process_count = int(os.environ.get('WORLD_SIZE', 1))
+    device = f'cuda:{local_rank}' if torch.cuda.is_available() else 'cpu'
+    if process_rank == 0: print("Device:", device)
+
+    if process_count > 1: torch.distributed.init_process_group(backend='nccl')
     torch.set_default_device(device)
     torch.manual_seed(1337)
     torch.set_float32_matmul_precision('high')
     torch.use_deterministic_algorithms(True)
 
-    data_path = Path(__file__).resolve().parent.parent / 'data' / 'shakespeare.txt'
-    text = data_path.read_text()
+    path = Path(__file__).resolve().parent.parent / 'data' / 'shakespeare.txt'
+    text = path.read_text()
     encoder = tiktoken.get_encoding("gpt2")
-    data = torch.tensor(encoder.encode(text), dtype=torch.long)
+    token_ids = torch.tensor(encoder.encode(text), dtype=torch.long)
     config = GPTConfig(ctx_length=1024, emb_size=768, block_count=12, head_count=12, vocab_size=50304)
     model = GPT(config)
-    loader = DataLoader(token_ids=data, batch_size=16, ctx_length=1024)
-    trainer = GPTTrainer(loader=loader, step_token_count=524288, step_count=50)
+    data_loader = DataLoader(process_rank, process_count, token_ids, batch_size=16, ctx_length=1024)
+    trainer = GPTTrainer(process_rank, process_count, data_loader, step_token_count=524288, step_count=50)
     optimizer = torch.optim.AdamW(model.get_param_groups(w_decay=0.1), lr=3e-4, betas=(0.9, 0.95), eps=1e-8, fused=True)
     compiled_model = torch.compile(model)
-    trainer.train(compiled_model, optimizer=optimizer)
+    trained_model = DDP(compiled_model, device_ids=[local_rank]) if process_count > 1 else compiled_model
+    trainer.train(trained_model, optimizer=optimizer)
 
-    torch.manual_seed(42)
     prompt = "Hello, I'm a language model,"
     input_token_ids = torch.tensor(encoder.encode(prompt), dtype=torch.long)
     output_token_ids = model.generate(input_token_ids.unsqueeze(0), new_token_count=30)[0]
-    print(encoder.decode(output_token_ids.tolist()))
+    if process_rank == 0: print(encoder.decode(output_token_ids.tolist()))
+    if process_count > 1: torch.distributed.destroy_process_group()
