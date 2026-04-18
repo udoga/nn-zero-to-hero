@@ -296,7 +296,7 @@ if __name__ == "__main__":
     device = f'cuda:{local_rank}' if torch.cuda.is_available() else 'cpu'
     print(f"Process rank: {process_rank}, Device: {device}")
 
-    if process_count > 1: torch.distributed.init_process_group(backend='nccl')
+    if process_count > 1: torch.distributed.init_process_group(backend='nccl', device_id=local_rank)
     torch.set_default_device(device)
     torch.manual_seed(1337)
     torch.set_float32_matmul_precision('high')
@@ -313,9 +313,13 @@ if __name__ == "__main__":
     compiled_model = torch.compile(model)
     trained_model = DDP(compiled_model, device_ids=[local_rank]) if process_count > 1 else compiled_model
     trainer.train(trained_model, optimizer=optimizer)
+    checkpoint_path = Path(__file__).resolve().with_suffix('.pt')
+    if process_rank == 0: torch.save(model.state_dict(), checkpoint_path)
+    if process_count > 1: torch.distributed.barrier()
 
-    prompt = "Hello, I'm a language model,"
-    input_token_ids = torch.tensor(encoder.encode(prompt), dtype=torch.long)
-    output_token_ids = model.generate(input_token_ids.unsqueeze(0), new_token_count=30)[0]
+    loaded_model = GPT(config)
+    loaded_model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+    input_token_ids = torch.tensor(encoder.encode("Hello, I'm a language model,"), dtype=torch.long)
+    output_token_ids = loaded_model.generate(input_token_ids.unsqueeze(0), new_token_count=300)[0]
     if process_rank == 0: print(encoder.decode(output_token_ids.tolist()))
     if process_count > 1: torch.distributed.destroy_process_group()
