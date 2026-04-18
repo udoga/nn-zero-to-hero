@@ -220,24 +220,23 @@ class GPTTrainer:
         return self.step_token_count // microstep_token_count
 
     def train(self, model, optimizer):
-        model.train()
         for step in range(self.step_count):
             self.step_and_measure(model, step, optimizer)
-            if step % 100 == 0: self.evaluate(model)
-        model.eval()
+            self.evaluate_periodically(model, step, period=100)
 
     def step_and_measure(self, model, step, optimizer):
+        model.train()
         t0 = time.time()
         loss, norm, lr = self.step(model, step, optimizer)
         torch.cuda.synchronize()
         t1 = time.time()
         elapsed_ms = (t1 - t0)*1000
-        tokens_per_sec = self.step_token_count * self.process_count / (t1 - t0)
-        self.print_row(step, loss, norm, lr, elapsed_ms, tokens_per_sec)
+        tokens_per_sec = self.step_token_count / (t1 - t0)
+        self.print_row(step, loss, lr, norm, elapsed_ms, tokens_per_sec)
 
-    def print_row(self, step, loss, norm, lr, elapsed_ms, tokens_per_sec):
+    def print_row(self, step, loss, lr, norm, elapsed_ms, tokens_per_sec):
         if self.process_rank == 0:
-            print(f"step: {step:5d} | loss: {loss:.6f} | norm: {norm.item():.4f} | lr: {lr:.4e} | "
+            print(f"step: {step:5d} | loss: {loss:.6f} | lr: {lr:.4e} | norm: {norm.item():.4f} | "
                   f"elapsed: {elapsed_ms:.2f}ms | tokens/s: {tokens_per_sec:.2f}")
 
     def step(self, model, step, optimizer):
@@ -281,21 +280,21 @@ class GPTTrainer:
         coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff starts at 1 and goes to 0
         return min_lr + coeff * (max_lr - min_lr)
 
-    def evaluate(self, model):
+    def evaluate_periodically(self, model, step, period):
+        if (step + 1) % period != 0 and step != self.step_count-1: return
         model.eval()
         self.val_loader.load_file(index=0)
         with torch.no_grad():
             loss = self.get_accumulated_loss(model, self.val_loader, microstep_count=20)
         if self.process_rank == 0:
             print(f"Validation loss: {loss:.6f}")
-        model.train()
 
 if __name__ == "__main__":
     process_rank = int(os.environ.get('RANK', 0))
     local_rank = int(os.environ.get('LOCAL_RANK', 0))
     process_count = int(os.environ.get('WORLD_SIZE', 1))
     device = f'cuda:{local_rank}' if torch.cuda.is_available() else 'cpu'
-    if process_rank == 0: print("Device:", device)
+    print(f"Process rank: {process_rank}, Device: {device}")
 
     if process_count > 1: torch.distributed.init_process_group(backend='nccl')
     torch.set_default_device(device)
